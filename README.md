@@ -2,6 +2,8 @@
 
 Search YouTube and play audio-only from the terminal. No browser needed.
 
+> **Keywords:** youtube cli, youtube audio, terminal music player, youtube terminal, macos audio player, yt-dlp cli, mpv youtube, background music terminal
+
 ```
 yp "lofi hip hop"
 ```
