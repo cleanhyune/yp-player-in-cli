@@ -17,7 +17,7 @@ yp "lofi hip hop"
 ## Install
 
 ```bash
-brew tap johyun/yp
+brew tap cleanhyune/yp
 brew install yp
 ```
 
