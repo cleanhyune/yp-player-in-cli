@@ -16,6 +16,7 @@ player.py     # mpv subprocess wrapper
 - **yt-dlp Python API** (not subprocess) — `YoutubeDL` class with `extract_flat: True` for fast search without fetching full metadata
 - **`_SilentLogger`** in `searcher.py` — suppresses yt-dlp's Python version deprecation warnings
 - **mpv `--no-video --ytdl-format=bestaudio`** — audio-only streaming; mpv handles all keyboard controls natively (space, arrows, 9/0, q)
+- **Lua seek script** — `_SEEK_SCRIPT` in `player.py`; written to a tempfile at runtime, passed via `--script`, deleted on exit. Binds `g` key to `mp.input.get()` for time-code input. Timecode format: 4 digits = MMSS, 5-6 digits = (H)HMMSS
 - **`from __future__ import annotations`** in `selector.py` — required for `str | None` syntax on Python 3.9
 - `duration` from yt-dlp is `float`, so `format_duration()` casts to `int` first
 
