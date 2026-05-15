@@ -78,7 +78,7 @@ def play(url: str) -> None:
         tmp.close()
         subprocess.run(
             ["mpv", "--no-video", "--ytdl-format=bestaudio",
-             "--msg-level=ao/coreaudio=error,ffmpeg/tls=no",
+             "--msg-level=ao/coreaudio=error,ffmpeg=error",
              f"--volume={volume}",
              f"--script={tmp.name}", url],
             check=False,
