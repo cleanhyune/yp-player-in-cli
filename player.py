@@ -3,6 +3,8 @@ import shutil
 import subprocess
 import tempfile
 
+_VOLUME_FILE = "/tmp/yp_volume"
+
 _SEEK_SCRIPT = """\
 local input = require("mp.input")
 
@@ -44,7 +46,24 @@ mp.add_key_binding("g", "seek-to-time", function()
         end
     })
 end)
+
+mp.register_event("shutdown", function()
+    local vol = mp.get_property_number("volume", 100)
+    local f = io.open(os.getenv("YP_VOLUME_FILE") or "/tmp/yp_volume", "w")
+    if f then
+        f:write(tostring(math.floor(vol)))
+        f:close()
+    end
+end)
 """
+
+
+def _load_volume() -> int:
+    try:
+        with open(_VOLUME_FILE) as f:
+            return int(f.read().strip())
+    except (FileNotFoundError, ValueError):
+        return 100
 
 
 def check_mpv() -> bool:
@@ -52,6 +71,7 @@ def check_mpv() -> bool:
 
 
 def play(url: str) -> None:
+    volume = _load_volume()
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".lua", delete=False)
     try:
         tmp.write(_SEEK_SCRIPT)
@@ -59,6 +79,7 @@ def play(url: str) -> None:
         subprocess.run(
             ["mpv", "--no-video", "--ytdl-format=bestaudio",
              "--msg-level=ao/coreaudio=error",
+             f"--volume={volume}",
              f"--script={tmp.name}", url],
             check=False,
         )
