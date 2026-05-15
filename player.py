@@ -4,6 +4,8 @@ import subprocess
 import tempfile
 
 _SEEK_SCRIPT = """\
+local input = require("mp.input")
+
 local function parse_timecode(s)
     s = s:match("^%s*(.-)%s*$")
     s = s:gsub(":", "")
@@ -26,7 +28,7 @@ local function parse_timecode(s)
 end
 
 mp.add_key_binding("g", "seek-to-time", function()
-    mp.input.get({
+    input.get({
         prompt = "이동할 시간 (0710 → 7:10 / 012930 → 1:29:30): ",
         submit = function(text)
             local secs = parse_timecode(text)
