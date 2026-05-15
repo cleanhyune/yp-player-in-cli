@@ -38,6 +38,7 @@ def main():
             query = questionary.text("다시 검색하세요:").ask() or ""
             continue
 
+        print("스트림 연결 중... (길이에 따라 수 초 걸릴 수 있습니다)")
         play(url)
 
         query = questionary.text("\n다음 검색어 (엔터로 종료):").ask() or ""

@@ -1,11 +1,18 @@
 from yt_dlp import YoutubeDL
 
 
+class _SilentLogger:
+    def debug(self, msg): pass
+    def warning(self, msg): pass
+    def error(self, msg): pass
+
+
 def search(query: str, max_results: int = 10) -> list[dict]:
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": True,
+        "logger": _SilentLogger(),
     }
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
