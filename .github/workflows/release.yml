@@ -36,7 +36,7 @@ jobs:
           cd homebrew-yp
 
           sed -i "s|url \"https://github.com/cleanhyune/yp-player-in-cli/.*\"|url \"${URL}\"|" Formula/yp.rb
-          sed -i "s|sha256 \"[a-f0-9]*\"|sha256 \"${SHA}\"|" Formula/yp.rb
+          sed -i "0,/sha256 \"[a-f0-9]*\"/{s|sha256 \"[a-f0-9]*\"|sha256 \"${SHA}\"|}" Formula/yp.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
