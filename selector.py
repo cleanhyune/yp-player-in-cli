@@ -4,6 +4,7 @@ import questionary
 
 
 def format_duration(seconds: int) -> str:
+    seconds = int(seconds)
     if seconds <= 0:
         return "0:00"
     h = seconds // 3600
