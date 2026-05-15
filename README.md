@@ -17,8 +17,7 @@ yp "lofi hip hop"
 ## Install
 
 ```bash
-brew tap cleanhyune/yp
-brew install yp
+brew install cleanhyune/yp/yp
 ```
 
 ## Usage
@@ -43,7 +42,7 @@ yp "검색어"           # 검색 후 화살표로 선택, 오디오 재생
 - macOS
 - [Homebrew](https://brew.sh)
 
-`mpv`는 `brew install yp` 시 자동으로 설치됩니다.
+`mpv`는 설치 시 자동으로 함께 설치됩니다.
 
 ## License
 
