@@ -40,8 +40,9 @@ def main():
 
         print("스트림 연결 중... (길이에 따라 수 초 걸릴 수 있습니다)")
         play(url)
+        print()
 
-        query = questionary.text("\n다음 검색어 (엔터로 종료):").ask() or ""
+        query = questionary.text("다음 검색어 (엔터로 종료):").ask() or ""
 
 
 if __name__ == "__main__":
