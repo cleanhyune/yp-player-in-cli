@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+
+      - name: Update Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          URL="https://github.com/cleanhyune/yp-player-in-cli/archive/refs/tags/${TAG}.tar.gz"
+          SHA=$(curl -sL "$URL" | sha256sum | awk '{print $1}')
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/cleanhyune/homebrew-yp.git"
+          cd homebrew-yp
+
+          sed -i "s|url \"https://github.com/cleanhyune/yp-player-in-cli/.*\"|url \"${URL}\"|" Formula/yp.rb
+          sed -i "s|sha256 \"[a-f0-9]*\"|sha256 \"${SHA}\"|" Formula/yp.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/yp.rb
+          git commit -m "chore: bump to ${TAG}"
+          git push
