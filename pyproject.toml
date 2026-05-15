@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "yp"
+version = "0.1.0"
+description = "Search YouTube and play audio-only from the terminal"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "yt-dlp",
+    "questionary",
+]
+
+[project.scripts]
+yp = "yp:main"
+
+[tool.setuptools]
+py-modules = ["yp", "searcher", "selector", "player"]
