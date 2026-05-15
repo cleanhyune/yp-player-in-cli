@@ -1,4 +1,6 @@
 import sys
+import warnings
+warnings.filterwarnings("ignore")
 import questionary
 from searcher import search
 from selector import select_video
