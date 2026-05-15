@@ -25,6 +25,7 @@ def search(query: str, max_results: int = 10) -> list[dict]:
             continue
         results.append({
             "title": entry.get("title", "제목 없음"),
+            "channel": entry.get("channel") or entry.get("uploader") or "알 수 없음",
             "url": url,
             "duration": entry.get("duration") or 0,
         })

@@ -17,11 +17,11 @@ def format_duration(seconds: int) -> str:
 
 def select_video(videos: list[dict]) -> str | None:
     choices = [
-        f"{v['title']} [{format_duration(v['duration'])}]"
+        f"{v['title']} · {v['channel']} [{format_duration(v['duration'])}]"
         for v in videos
     ]
     label_to_url = {
-        f"{v['title']} [{format_duration(v['duration'])}]": v["url"]
+        f"{v['title']} · {v['channel']} [{format_duration(v['duration'])}]": v["url"]
         for v in videos
     }
 
