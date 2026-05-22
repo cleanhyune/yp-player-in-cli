@@ -3,7 +3,7 @@ import warnings
 warnings.filterwarnings("ignore")
 import questionary
 from searcher import search
-from selector import select_video
+from selector import select_video, NEXT_PAGE, PREV_PAGE
 from player import play, check_mpv
 
 
@@ -35,16 +35,22 @@ def main():
             query = questionary.text("다시 검색하세요:").ask() or ""
             continue
 
-        url = select_video(videos)
-        if url is None:
-            query = questionary.text("다시 검색하세요:").ask() or ""
-            continue
-
-        print("스트림 연결 중... (길이에 따라 수 초 걸릴 수 있습니다)")
-        play(url)
-        print()
-
-        query = questionary.text("다음 검색어 (엔터로 종료):").ask() or ""
+        page = 1
+        while True:
+            result = select_video(videos, page=page)
+            if result == NEXT_PAGE:
+                page += 1
+            elif result == PREV_PAGE:
+                page -= 1
+            elif result is None:
+                query = questionary.text("다시 검색하세요:").ask() or ""
+                break
+            else:
+                print("스트림 연결 중... (길이에 따라 수 초 걸릴 수 있습니다)")
+                play(result)
+                print()
+                query = questionary.text("다음 검색어 (엔터로 종료):").ask() or ""
+                break
 
 
 if __name__ == "__main__":
