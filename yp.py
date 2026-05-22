@@ -35,13 +35,14 @@ def main():
             query = questionary.text("다시 검색하세요:").ask() or ""
             continue
 
+        MAX_PAGES = 3
         page = 1
         while True:
-            result = select_video(videos, page=page)
+            result = select_video(videos, page=page, max_pages=MAX_PAGES)
             if result == NEXT_PAGE:
-                page += 1
+                page = min(page + 1, MAX_PAGES)
             elif result == PREV_PAGE:
-                page -= 1
+                page = max(page - 1, 1)
             elif result is None:
                 query = questionary.text("다시 검색하세요:").ask() or ""
                 break
