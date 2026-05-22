@@ -7,7 +7,7 @@ class _SilentLogger:
     def error(self, msg): pass
 
 
-def search(query: str, max_results: int = 10) -> list[dict]:
+def search(query: str, max_results: int = 30) -> list[dict]:
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
