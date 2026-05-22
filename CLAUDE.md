@@ -37,8 +37,8 @@ brew install mpv
 ## Data Flow
 
 ```
-search(query) -> [{"title", "url", "duration"}, ...]
-select_video(videos) -> url | None
+search(query) -> [{"title", "url", "duration"}, ...]  # 30개 한번에
+select_video(videos, page, max_pages) -> url | NEXT_PAGE | PREV_PAGE | None
 play(url) -> None  (blocks until mpv exits)
 ```
 
@@ -49,6 +49,4 @@ play(url) -> None  (blocks until mpv exits)
 
 **Releasing a new version:**
 1. Commit changes, `git tag vX.X.X && git push origin vX.X.X`
-2. Create GitHub release from the tag
-3. `curl -sL <tarball_url> | shasum -a 256` → update sha256 in `Formula/yp.rb`
-4. Push `homebrew-yp`
+2. GitHub Actions가 태그 push를 감지해 릴리즈 생성 및 `homebrew-yp` Formula 자동 업데이트까지 처리함 — 수동 배포 불필요
