@@ -13,6 +13,8 @@ def search(query: str, max_results: int = 30) -> list[dict]:
         "no_warnings": True,
         "extract_flat": True,
         "logger": _SilentLogger(),
+        "http_headers": {"Accept-Language": "ko-KR,ko;q=0.9"},
+        "extractor_args": {"youtube": {"lang": ["ko"]}},
     }
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
