@@ -55,11 +55,17 @@ def open_comments_window(comments: list[dict], title: str) -> None:
     try:
         tmp.write(content)
         tmp.close()
-        script = (
-            f'tell application "Terminal" to do script '
-            f'"cat {tmp.name}; read; rm {tmp.name}"'
-        )
-        subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
+        if os.environ.get("TMUX"):
+            subprocess.run(
+                ["tmux", "new-window", f"cat {tmp.name}; read; rm {tmp.name}"],
+                check=False,
+            )
+        else:
+            script = (
+                f'tell application "Terminal" to do script '
+                f'"cat {tmp.name}; read; rm {tmp.name}"'
+            )
+            subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
     except Exception:
         try:
             os.unlink(tmp.name)
