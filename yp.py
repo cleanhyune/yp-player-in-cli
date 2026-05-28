@@ -1,12 +1,10 @@
 import sys
-import threading
 import warnings
 warnings.filterwarnings("ignore")
 import questionary
 from searcher import search
 from selector import select_video, NEXT_PAGE, PREV_PAGE
 from player import play, check_mpv
-from comments import fetch_comments, open_comments_window
 
 
 def get_first_query() -> str:
@@ -49,20 +47,6 @@ def main():
                 query = questionary.text("다시 검색하세요:").ask() or ""
                 break
             else:
-                title = next((v["title"] for v in videos if v["url"] == result), "YouTube")
-
-                def _show_comments(url: str, video_title: str) -> None:
-                    try:
-                        comments = fetch_comments(url)
-                        if comments:
-                            open_comments_window(comments, video_title)
-                    except Exception:
-                        pass
-
-                threading.Thread(
-                    target=_show_comments, args=(result, title), daemon=True
-                ).start()
-
                 print("스트림 연결 중... (길이에 따라 수 초 걸릴 수 있습니다)")
                 play(result)
                 print()
