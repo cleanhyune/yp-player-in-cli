@@ -36,4 +36,32 @@ def fetch_comments(url: str, limit: int = 30) -> list[dict]:
 
 
 def open_comments_window(comments: list[dict], title: str) -> None:
-    pass
+    lines = [title, "━" * 44, ""]
+    for i, c in enumerate(comments, 1):
+        like = f" | 👍 {c['like_count']:,}" if c["like_count"] else ""
+        lines.append(f" {i:2}. {c['author']}{like}")
+        text = c["text"]
+        while text:
+            lines.append(f"     {text[:76]}")
+            text = text[76:]
+        lines.append("")
+    lines.append("(엔터로 창 닫기)")
+
+    content = "\n".join(lines)
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    )
+    try:
+        tmp.write(content)
+        tmp.close()
+        script = (
+            f'tell application "Terminal" to do script '
+            f'"cat {tmp.name}; read; rm {tmp.name}"'
+        )
+        subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
+    except Exception:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
