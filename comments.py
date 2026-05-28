@@ -19,7 +19,7 @@ def fetch_comments(url: str, limit: int = 30) -> list[dict]:
         "no_warnings": True,
         "logger": _SilentLogger(),
         "getcomments": True,
-        "extractor_args": {"youtube": {"max_comments": [str(limit)]}},
+        "extractor_args": {"youtube": {"max_comments": [str(limit)], "comment_sort": ["top"]}},
     }
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
