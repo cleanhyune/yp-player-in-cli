@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 
 _VOLUME_FILE = "/tmp/yp_volume"
@@ -95,6 +96,18 @@ def check_mpv() -> bool:
     return shutil.which("mpv") is not None
 
 
+def _ytdlp_path() -> str:
+    """Prefer the yt-dlp bundled alongside this interpreter (e.g. Homebrew venv),
+    then a Homebrew-managed yt-dlp, which is kept newer than pip's py3.9 build."""
+    bundled = os.path.join(os.path.dirname(sys.executable), "yt-dlp")
+    if os.path.exists(bundled):
+        return bundled
+    for brew_path in ("/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp"):
+        if os.path.exists(brew_path):
+            return brew_path
+    return "yt-dlp"
+
+
 def play(url: str) -> None:
     volume = _load_volume()
     project_dir = os.path.dirname(os.path.abspath(__file__))
@@ -109,8 +122,9 @@ def play(url: str) -> None:
         lua.close()
 
         subprocess.run(
-            ["mpv", "--no-video", "--ytdl-format=bestaudio",
+            ["mpv", "--no-video", "--ytdl-format=bestaudio/best",
              "--msg-level=ao/coreaudio=error,ffmpeg=error",
+             f"--script-opts=ytdl_hook-ytdl_path={_ytdlp_path()}",
              f"--volume={volume}",
              f"--script={lua.name}", url],
             check=False,
