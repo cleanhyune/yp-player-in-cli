@@ -17,9 +17,10 @@ comments.py   # Fetches top comments, shows them in a new terminal window (on-de
 
 - **yt-dlp Python API** (not subprocess) — `YoutubeDL` class with `extract_flat: True` for fast search without fetching full metadata
 - **`_SilentLogger`** in `searcher.py` — suppresses yt-dlp's Python version deprecation warnings
-- **mpv `--no-video --ytdl-format=bestaudio/best`** — audio-only streaming with a fallback format; mpv handles all keyboard controls natively (space, arrows, 9/0, q, `g` seek, `t` comments)
-- **Lua seek script** — `_SEEK_SCRIPT` in `player.py`; written to a tempfile at runtime, passed via `--script`, deleted on exit. Binds `g` key to `mp.input.get()` for time-code input. Timecode format: 4 digits = MMSS, 5-6 digits = (H)HMMSS. Also registers an `end-file` handler that writes mpv's exit reason (`eof`/`stop`/`quit`/`error`) to `/tmp/yp_last_reason`, read back by `player._load_reason()`
+- **mpv `--no-video --ytdl-format=bestaudio/best`** — audio-only streaming with a fallback format; mpv handles all keyboard controls natively (space, arrows, 9/0, q, `g` seek, `t` comments, `a` autoplay toggle)
+- **Lua seek script** — `_SEEK_SCRIPT` in `player.py`; written to a tempfile at runtime, passed via `--script`, deleted on exit. Binds `g` key to `mp.input.get()` for time-code input. Timecode format: 4 digits = MMSS, 5-6 digits = (H)HMMSS. Also registers an `end-file` handler that writes mpv's exit reason (`eof`/`stop`/`quit`/`error`) to `/tmp/yp_last_reason`, read back by `player._load_reason()`. Binds `a` to toggle autoplay, persisted to `/tmp/yp_autoplay` (`"0"`/`"1"`, default on), read back by `player.is_autoplay_enabled()`
 - **Autoplay via sidebar scraping, not yt-dlp** — `related.py` fetches the watch page HTML directly and parses the `ytInitialData` JSON blob for the real "related videos" sidebar (`lockupViewModel` entries under `contents.twoColumnWatchNextResults.secondaryResults...`). An earlier version used yt-dlp's `RD<video_id>` mix playlist, but that mix doesn't exist for many videos (e.g. broadcast/drama clips) — see [[autoplay_related_videos]] memory. yt-dlp deliberately doesn't expose this sidebar, so this parsing is unofficial and self-maintained: if YouTube changes the JSON shape, only fixing `related.py` (not `pip install -U yt-dlp`) will help. `fetch_next()` swallows every exception internally so a broken parse can never propagate into the autoplay loop
+- **Autoplay prefetch** — `yp.py`'s `_start_prefetch()` kicks off `related.fetch_next()` in a `daemon=True` background thread as soon as the current video starts playing, so the next video is usually already resolved by the time mpv hits EOF (no "다음 영상을 찾는 중..." pause). `played_ids` is snapshotted with `set(played_ids)` before handing it to the thread, since the main loop keeps mutating the original set concurrently
 - **`from __future__ import annotations`** in `selector.py`/`related.py`/`comments.py` — required for `str | None` syntax on Python 3.9
 - `duration` from yt-dlp is `float`, so `format_duration()` casts to `int` first
 
@@ -43,8 +44,10 @@ brew install mpv
 search(query) -> [{"title", "channel", "url", "duration"}, ...]  # 30개 한번에
 select_video(videos, page, max_pages) -> url | NEXT_PAGE | PREV_PAGE | None
 play(url) -> reason  (blocks until mpv exits; reason = "eof"/"stop"/"quit"/"error"/"unknown")
+is_autoplay_enabled() -> bool  ("a" 키로 토글, /tmp/yp_autoplay에 저장, 기본 True)
 
-# yp.py의 재생 분기: reason == "eof"인 동안 아래를 반복해 자동재생 체인을 이어감
+# yp.py의 재생 분기: reason == "eof" and is_autoplay_enabled()인 동안 반복해 자동재생 체인을 이어감
+# 다음 영상 조회는 현재 영상 재생 시작 시점에 백그라운드 스레드로 미리 해둠(prefetch)
 fetch_next(url, played_ids) -> {"title", "channel", "url", "duration"} | None
 ```
 
