@@ -1,10 +1,11 @@
 import sys
+import threading
 import warnings
 warnings.filterwarnings("ignore")
 import questionary
 from searcher import search
 from selector import select_video, NEXT_PAGE, PREV_PAGE
-from player import play, check_mpv
+from player import play, check_mpv, is_autoplay_enabled
 from related import fetch_next, extract_video_id
 
 
@@ -12,6 +13,18 @@ def get_first_query() -> str:
     if len(sys.argv) > 1:
         return " ".join(sys.argv[1:])
     return questionary.text("검색어를 입력하세요:").ask() or ""
+
+
+def _start_prefetch(url, played_ids):
+    if not is_autoplay_enabled():
+        return None, None
+    box = {}
+    thread = threading.Thread(
+        target=lambda: box.__setitem__("result", fetch_next(url, set(played_ids))),
+        daemon=True,
+    )
+    thread.start()
+    return thread, box
 
 
 def main():
@@ -49,16 +62,20 @@ def main():
                 break
             else:
                 played_ids = {extract_video_id(result)}
+                thread, box = _start_prefetch(result, played_ids)
                 print("스트림 연결 중... (길이에 따라 수 초 걸릴 수 있습니다)")
                 reason = play(result)
-                while reason == "eof":
-                    print("\n다음 영상을 찾는 중...")
-                    next_video = fetch_next(result, played_ids)
+                while reason == "eof" and is_autoplay_enabled():
+                    if thread is None:
+                        break
+                    thread.join()
+                    next_video = box.get("result")
                     if next_video is None:
                         break
                     result = next_video["url"]
                     played_ids.add(extract_video_id(result))
                     print(f"🔁 자동재생: {next_video['title']} · {next_video['channel']}")
+                    thread, box = _start_prefetch(result, played_ids)
                     reason = play(result)
                 print()
                 query = questionary.text("다음 검색어 (엔터로 종료):").ask() or ""
