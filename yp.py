@@ -5,6 +5,7 @@ import questionary
 from searcher import search
 from selector import select_video, NEXT_PAGE, PREV_PAGE
 from player import play, check_mpv
+from related import fetch_next, extract_video_id
 
 
 def get_first_query() -> str:
@@ -47,8 +48,18 @@ def main():
                 query = questionary.text("다시 검색하세요:").ask() or ""
                 break
             else:
+                played_ids = {extract_video_id(result)}
                 print("스트림 연결 중... (길이에 따라 수 초 걸릴 수 있습니다)")
-                play(result)
+                reason = play(result)
+                while reason == "eof":
+                    print("\n다음 영상을 찾는 중...")
+                    next_video = fetch_next(result, played_ids)
+                    if next_video is None:
+                        break
+                    result = next_video["url"]
+                    played_ids.add(extract_video_id(result))
+                    print(f"🔁 자동재생: {next_video['title']} · {next_video['channel']}")
+                    reason = play(result)
                 print()
                 query = questionary.text("다음 검색어 (엔터로 종료):").ask() or ""
                 break
