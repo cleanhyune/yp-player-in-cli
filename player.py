@@ -5,6 +5,7 @@ import sys
 import tempfile
 
 _VOLUME_FILE = "/tmp/yp_volume"
+_REASON_FILE = "/tmp/yp_last_reason"
 
 _SEEK_SCRIPT = """\
 local input = require("mp.input")
@@ -56,6 +57,14 @@ mp.register_event("shutdown", function()
         f:close()
     end
 end)
+
+mp.register_event("end-file", function(event)
+    local f = io.open("/tmp/yp_last_reason", "w")
+    if f then
+        f:write(event.reason or "unknown")
+        f:close()
+    end
+end)
 """
 
 _COMMENTS_BINDING_TEMPLATE = """\
@@ -92,6 +101,14 @@ def _load_volume() -> int:
         return 100
 
 
+def _load_reason() -> str:
+    try:
+        with open(_REASON_FILE) as f:
+            return f.read().strip() or "unknown"
+    except FileNotFoundError:
+        return "unknown"
+
+
 def check_mpv() -> bool:
     return shutil.which("mpv") is not None
 
@@ -108,9 +125,14 @@ def _ytdlp_path() -> str:
     return "yt-dlp"
 
 
-def play(url: str) -> None:
+def play(url: str) -> str:
     volume = _load_volume()
     project_dir = os.path.dirname(os.path.abspath(__file__))
+
+    try:
+        os.remove(_REASON_FILE)
+    except FileNotFoundError:
+        pass
 
     helper = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False)
     lua = tempfile.NamedTemporaryFile(mode="w", suffix=".lua", delete=False)
@@ -132,3 +154,5 @@ def play(url: str) -> None:
     finally:
         os.unlink(lua.name)
         os.unlink(helper.name)
+
+    return _load_reason()
