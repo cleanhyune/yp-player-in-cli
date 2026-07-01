@@ -9,17 +9,17 @@ yp.py         # Entry point, main search→select→play→autoplay loop
 searcher.py   # YouTube search via yt-dlp YoutubeDL API
 selector.py   # Arrow-key selection UI via questionary
 player.py     # mpv subprocess wrapper, tracks mpv exit reason
-related.py    # Next-video lookup via YouTube's RD<video_id> mix playlist
+related.py    # Next-video lookup by parsing the watch page's related-video sidebar
 comments.py   # Fetches top comments, shows them in a new terminal window (on-demand, 't' key in mpv)
 ```
 
 ## Key Decisions
 
 - **yt-dlp Python API** (not subprocess) — `YoutubeDL` class with `extract_flat: True` for fast search without fetching full metadata
-- **`_SilentLogger`** in `searcher.py`/`related.py` — suppresses yt-dlp's Python version deprecation warnings
+- **`_SilentLogger`** in `searcher.py` — suppresses yt-dlp's Python version deprecation warnings
 - **mpv `--no-video --ytdl-format=bestaudio/best`** — audio-only streaming with a fallback format; mpv handles all keyboard controls natively (space, arrows, 9/0, q, `g` seek, `t` comments)
 - **Lua seek script** — `_SEEK_SCRIPT` in `player.py`; written to a tempfile at runtime, passed via `--script`, deleted on exit. Binds `g` key to `mp.input.get()` for time-code input. Timecode format: 4 digits = MMSS, 5-6 digits = (H)HMMSS. Also registers an `end-file` handler that writes mpv's exit reason (`eof`/`stop`/`quit`/`error`) to `/tmp/yp_last_reason`, read back by `player._load_reason()`
-- **Autoplay via YouTube mix** — `related.py` has no way to read the "related videos" sidebar from `extract_info()`; instead it fetches the `RD<video_id>` mix playlist, the same queue YouTube's own autoplay uses. Undocumented/unofficial — could break if YouTube changes it (same risk class as the SABR playback break, see `player._ytdlp_path()`)
+- **Autoplay via sidebar scraping, not yt-dlp** — `related.py` fetches the watch page HTML directly and parses the `ytInitialData` JSON blob for the real "related videos" sidebar (`lockupViewModel` entries under `contents.twoColumnWatchNextResults.secondaryResults...`). An earlier version used yt-dlp's `RD<video_id>` mix playlist, but that mix doesn't exist for many videos (e.g. broadcast/drama clips) — see [[autoplay_related_videos]] memory. yt-dlp deliberately doesn't expose this sidebar, so this parsing is unofficial and self-maintained: if YouTube changes the JSON shape, only fixing `related.py` (not `pip install -U yt-dlp`) will help. `fetch_next()` swallows every exception internally so a broken parse can never propagate into the autoplay loop
 - **`from __future__ import annotations`** in `selector.py`/`related.py`/`comments.py` — required for `str | None` syntax on Python 3.9
 - `duration` from yt-dlp is `float`, so `format_duration()` casts to `int` first
 
