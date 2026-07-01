@@ -6,6 +6,7 @@ import tempfile
 
 _VOLUME_FILE = "/tmp/yp_volume"
 _REASON_FILE = "/tmp/yp_last_reason"
+_AUTOPLAY_FILE = "/tmp/yp_autoplay"
 
 _SEEK_SCRIPT = """\
 local input = require("mp.input")
@@ -65,6 +66,22 @@ mp.register_event("end-file", function(event)
         f:close()
     end
 end)
+
+mp.add_key_binding("a", "toggle-autoplay", function()
+    local current = "1"
+    local f = io.open("/tmp/yp_autoplay", "r")
+    if f then
+        current = f:read("*l") or "1"
+        f:close()
+    end
+    local new_val = (current == "0") and "1" or "0"
+    local out = io.open("/tmp/yp_autoplay", "w")
+    if out then
+        out:write(new_val)
+        out:close()
+    end
+    mp.osd_message("자동재생: " .. (new_val == "1" and "켜짐" or "꺼짐"), 2)
+end)
 """
 
 _COMMENTS_BINDING_TEMPLATE = """\
@@ -107,6 +124,14 @@ def _load_reason() -> str:
             return f.read().strip() or "unknown"
     except FileNotFoundError:
         return "unknown"
+
+
+def is_autoplay_enabled() -> bool:
+    try:
+        with open(_AUTOPLAY_FILE) as f:
+            return f.read().strip() != "0"
+    except FileNotFoundError:
+        return True
 
 
 def check_mpv() -> bool:
