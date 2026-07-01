@@ -5,19 +5,22 @@ CLI tool that searches YouTube and plays audio-only via mpv. macOS only.
 ## Structure
 
 ```
-yp.py         # Entry point, main search→select→play loop
+yp.py         # Entry point, main search→select→play→autoplay loop
 searcher.py   # YouTube search via yt-dlp YoutubeDL API
 selector.py   # Arrow-key selection UI via questionary
-player.py     # mpv subprocess wrapper
+player.py     # mpv subprocess wrapper, tracks mpv exit reason
+related.py    # Next-video lookup via YouTube's RD<video_id> mix playlist
+comments.py   # Fetches top comments, shows them in a new terminal window (on-demand, 't' key in mpv)
 ```
 
 ## Key Decisions
 
 - **yt-dlp Python API** (not subprocess) — `YoutubeDL` class with `extract_flat: True` for fast search without fetching full metadata
-- **`_SilentLogger`** in `searcher.py` — suppresses yt-dlp's Python version deprecation warnings
-- **mpv `--no-video --ytdl-format=bestaudio`** — audio-only streaming; mpv handles all keyboard controls natively (space, arrows, 9/0, q)
-- **Lua seek script** — `_SEEK_SCRIPT` in `player.py`; written to a tempfile at runtime, passed via `--script`, deleted on exit. Binds `g` key to `mp.input.get()` for time-code input. Timecode format: 4 digits = MMSS, 5-6 digits = (H)HMMSS
-- **`from __future__ import annotations`** in `selector.py` — required for `str | None` syntax on Python 3.9
+- **`_SilentLogger`** in `searcher.py`/`related.py` — suppresses yt-dlp's Python version deprecation warnings
+- **mpv `--no-video --ytdl-format=bestaudio/best`** — audio-only streaming with a fallback format; mpv handles all keyboard controls natively (space, arrows, 9/0, q, `g` seek, `t` comments)
+- **Lua seek script** — `_SEEK_SCRIPT` in `player.py`; written to a tempfile at runtime, passed via `--script`, deleted on exit. Binds `g` key to `mp.input.get()` for time-code input. Timecode format: 4 digits = MMSS, 5-6 digits = (H)HMMSS. Also registers an `end-file` handler that writes mpv's exit reason (`eof`/`stop`/`quit`/`error`) to `/tmp/yp_last_reason`, read back by `player._load_reason()`
+- **Autoplay via YouTube mix** — `related.py` has no way to read the "related videos" sidebar from `extract_info()`; instead it fetches the `RD<video_id>` mix playlist, the same queue YouTube's own autoplay uses. Undocumented/unofficial — could break if YouTube changes it (same risk class as the SABR playback break, see `player._ytdlp_path()`)
+- **`from __future__ import annotations`** in `selector.py`/`related.py`/`comments.py` — required for `str | None` syntax on Python 3.9
 - `duration` from yt-dlp is `float`, so `format_duration()` casts to `int` first
 
 ## Commands
@@ -37,9 +40,12 @@ brew install mpv
 ## Data Flow
 
 ```
-search(query) -> [{"title", "url", "duration"}, ...]  # 30개 한번에
+search(query) -> [{"title", "channel", "url", "duration"}, ...]  # 30개 한번에
 select_video(videos, page, max_pages) -> url | NEXT_PAGE | PREV_PAGE | None
-play(url) -> None  (blocks until mpv exits)
+play(url) -> reason  (blocks until mpv exits; reason = "eof"/"stop"/"quit"/"error"/"unknown")
+
+# yp.py의 재생 분기: reason == "eof"인 동안 아래를 반복해 자동재생 체인을 이어감
+fetch_next(url, played_ids) -> {"title", "channel", "url", "duration"} | None
 ```
 
 ## Distribution
