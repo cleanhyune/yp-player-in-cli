@@ -1,6 +1,6 @@
 # yp
 
-Search YouTube and play audio-only from the terminal. No browser needed.
+터미널에서 유튜브를 검색하고 오디오만 재생합니다. 브라우저가 필요 없습니다.
 
 > **Keywords:** youtube cli, youtube audio, terminal music player, youtube terminal, macos audio player, yt-dlp cli, mpv youtube, background music terminal
 
@@ -36,13 +36,13 @@ yp "lofi hip hop"
 
 ![종료 후 재검색](assets/demo-exit.gif)
 
-## Install
+## 설치
 
 ```bash
 brew install cleanhyune/yp/yp
 ```
 
-## Usage
+## 사용법
 
 ```bash
 yp "검색어"           # 검색 후 화살표로 선택, 오디오 재생
@@ -62,13 +62,13 @@ yp "검색어"           # 검색 후 화살표로 선택, 오디오 재생
 
 영상이 끝까지 재생되면 유튜브의 실제 "연관 동영상"을 찾아 자동으로 이어서 재생합니다. `a`로 끄거나 `q`로 직접 종료하면 새 검색어 입력 프롬프트로 돌아옵니다. `Enter`만 누르면 종료.
 
-## Requirements
+## 요구 사항
 
 - macOS
 - [Homebrew](https://brew.sh)
 
 `mpv`는 설치 시 자동으로 함께 설치됩니다.
 
-## License
+## 라이선스
 
 MIT
