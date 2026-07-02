@@ -89,7 +89,7 @@ _COMMENTS_BINDING_TEMPLATE = """\
 mp.add_key_binding("t", "show-comments", function()
     local url = mp.get_property("path")
     local title = mp.get_property("media-title") or url
-    mp.commandv("run", "python3", "{helper}", url, title)
+    mp.commandv("run", "{python}", "{helper}", url, title)
     mp.osd_message("댓글 불러오는 중...", 2)
 end)
 """
@@ -165,7 +165,7 @@ def play(url: str) -> str:
         helper.write(_COMMENTS_HELPER_TEMPLATE.format(project_dir=project_dir))
         helper.close()
 
-        lua.write(_SEEK_SCRIPT + _COMMENTS_BINDING_TEMPLATE.format(helper=helper.name))
+        lua.write(_SEEK_SCRIPT + _COMMENTS_BINDING_TEMPLATE.format(python=sys.executable, helper=helper.name))
         lua.close()
 
         subprocess.run(
