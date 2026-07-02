@@ -59,3 +59,12 @@ fetch_next(url, played_ids) -> {"title", "channel", "url", "duration"} | None
 **Releasing a new version:**
 1. Commit changes, `git tag vX.X.X && git push origin vX.X.X`
 2. GitHub Actions가 태그 push를 감지해 릴리즈 생성 및 `homebrew-yp` Formula 자동 업데이트까지 처리함 — 수동 배포 불필요
+
+**새 `.py` 모듈을 추가할 때** `pyproject.toml`의 `[tool.setuptools] py-modules` 목록에도 반드시 추가할 것. v0.3.0까지 이 목록이 업데이트되지 않아 `related.py`/`comments.py`가 brew 배포판에서 누락되어, 실제 설치한 사용자는 검색만 해도 `ModuleNotFoundError`로 죽는 상태였음 (v0.3.1에서 수정). 로컬 개발 중에는 `python3 yp.py`로 직접 실행하므로 이 문제가 드러나지 않는다 — 릴리즈 전엔 `python3 -m build --sdist`로 실제 패키징 결과물에 모든 모듈이 포함되는지 확인.
+
+## Demo GIFs
+
+`assets/demo-*.gif`는 `assets/demo-*.tape` ([vhs](https://github.com/charmbracelet/vhs)) 스크립트로 생성됨. 재생성 시:
+- `brew install vhs`, 검색어는 실제 업로드 영상만 나오는 걸로 (라이브 방송/과거 라이브 아카이브는 이 환경에서 HLS 스트림 오픈이 잘 실패함 — `python3 -c "from searcher import search; ..."`로 먼저 결과를 확인하고 `duration`이 있는 항목을 고를 것)
+- 녹화 중 실제로 오디오가 재생되므로 `/tmp/yp_volume`을 임시로 `0`으로 덮어써서 음소거한 뒤 복원
+- `vhs assets/demo-X.tape` 실행 → `assets/demo-X.gif` 생성

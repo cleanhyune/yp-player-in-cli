@@ -16,6 +16,26 @@ yp "lofi hip hop"
   ...
 ```
 
+### 검색 & 화살표 선택
+
+![검색 및 선택](assets/demo-search.gif)
+
+### `g`로 타임라인 이동
+
+![타임라인 이동](assets/demo-seek.gif)
+
+### `9` / `0`로 볼륨 조절
+
+![볼륨 조절](assets/demo-volume.gif)
+
+### `a`로 자동재생 켜기/끄기
+
+![자동재생 토글](assets/demo-autoplay.gif)
+
+### `q`로 종료 후 재검색
+
+![종료 후 재검색](assets/demo-exit.gif)
+
 ## Install
 
 ```bash
