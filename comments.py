@@ -4,6 +4,12 @@ import os
 import subprocess
 import tempfile
 
+# Must be set before yt_dlp is imported: a user's globally-installed yt-dlp
+# plugin (e.g. a broken PO-token provider under ~/.config/yt-dlp/plugins/)
+# can raise on load and take down comment fetching with it. Comments don't
+# need any extractor plugins, so disable plugin auto-loading entirely.
+os.environ["YTDLP_NO_PLUGINS"] = "1"
+
 from yt_dlp import YoutubeDL
 
 
