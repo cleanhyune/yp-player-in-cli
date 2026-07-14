@@ -12,18 +12,14 @@ os.environ["YTDLP_NO_PLUGINS"] = "1"
 
 from yt_dlp import YoutubeDL
 
-
-class _SilentLogger:
-    def debug(self, msg): pass
-    def warning(self, msg): pass
-    def error(self, msg): pass
+from ytdlp_common import SilentLogger
 
 
-def fetch_comments(url: str, limit: int = 30) -> list[dict]:
+def fetch_comments(url: str, limit: int = 100) -> list[dict]:
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
-        "logger": _SilentLogger(),
+        "logger": SilentLogger(),
         "getcomments": True,
         "extractor_args": {"youtube": {"max_comments": [str(limit)], "comment_sort": ["top"]}},
     }

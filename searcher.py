@@ -1,10 +1,6 @@
 from yt_dlp import YoutubeDL
 
-
-class _SilentLogger:
-    def debug(self, msg): pass
-    def warning(self, msg): pass
-    def error(self, msg): pass
+from ytdlp_common import SilentLogger
 
 
 def search(query: str, max_results: int = 30) -> list[dict]:
@@ -12,7 +8,7 @@ def search(query: str, max_results: int = 30) -> list[dict]:
         "quiet": True,
         "no_warnings": True,
         "extract_flat": True,
-        "logger": _SilentLogger(),
+        "logger": SilentLogger(),
         "http_headers": {"Accept-Language": "ko-KR,ko;q=0.9"},
         "extractor_args": {"youtube": {"lang": ["ko"]}},
     }

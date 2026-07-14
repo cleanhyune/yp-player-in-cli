@@ -29,10 +29,7 @@ def select_video(videos: list[dict], page: int = 1, max_pages: int = 3) -> str |
         f"{v['title']} · {v['channel']} [{format_duration(v['duration'])}]"
         for v in page_videos
     ]
-    label_to_url = {
-        f"{v['title']} · {v['channel']} [{format_duration(v['duration'])}]": v["url"]
-        for v in page_videos
-    }
+    label_to_url = dict(zip(choices, (v["url"] for v in page_videos)))
 
     if page > 1:
         choices = ["◀ 이전 페이지"] + choices

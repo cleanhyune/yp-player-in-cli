@@ -53,7 +53,6 @@ def _lockup_to_video(lockup: dict) -> dict:
         "title": metadata["title"]["content"],
         "channel": channel,
         "url": f"https://www.youtube.com/watch?v={lockup['contentId']}",
-        "duration": 0,
     }
 
 

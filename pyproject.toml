@@ -18,4 +18,4 @@ dependencies = [
 yp = "yp:main"
 
 [tool.setuptools]
-py-modules = ["yp", "searcher", "selector", "player", "related", "comments"]
+py-modules = ["yp", "searcher", "selector", "player", "related", "comments", "ytdlp_common"]
