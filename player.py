@@ -106,7 +106,18 @@ try:
     if comments:
         open_comments_window(comments, title)
 except Exception:
-    pass
+    import traceback
+    import os
+    import subprocess
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
+    tmp.write("댓글을 불러오는 중 오류가 발생했습니다:\\n" + traceback.format_exc())
+    tmp.close()
+    if os.environ.get("TMUX"):
+        subprocess.run(["tmux", "new-window", f"cat {{tmp.name}}; read; rm {{tmp.name}}"], check=False)
+    else:
+        script = f'tell application "Terminal" to do script "cat {{tmp.name}}; read; rm {{tmp.name}}"'
+        subprocess.run(["osascript", "-e", script], check=False)
 """
 
 

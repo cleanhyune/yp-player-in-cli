@@ -33,6 +33,7 @@ def fetch_comments(url: str, limit: int = 100) -> list[dict]:
             "author": c.get("author") or "알 수 없음",
             "text": c.get("text") or "",
             "like_count": c.get("like_count") or 0,
+            "parent": c.get("parent") or "root",
         })
     return result
 
@@ -40,12 +41,21 @@ def fetch_comments(url: str, limit: int = 100) -> list[dict]:
 def open_comments_window(comments: list[dict], title: str) -> None:
     lines = [title, "━" * 44, ""]
     for i, c in enumerate(comments, 1):
-        like = f" | 👍 {c['like_count']:,}" if c["like_count"] else ""
-        lines.append(f" {i:2}. {c['author']}{like}")
-        text = c["text"]
-        while text:
-            lines.append(f"     {text[:76]}")
-            text = text[76:]
+        like = f" | 좋아요 {c['like_count']:,}" if c["like_count"] else ""
+        is_reply = c.get("parent", "root") != "root"
+        
+        if is_reply:
+            lines.append(f"     └─ {c['author']}{like}")
+            text = c["text"]
+            while text:
+                lines.append(f"        {text[:72]}")
+                text = text[72:]
+        else:
+            lines.append(f" {i:2}. {c['author']}{like}")
+            text = c["text"]
+            while text:
+                lines.append(f"     {text[:76]}")
+                text = text[76:]
         lines.append("")
     lines.append("(엔터로 창 닫기)")
 
