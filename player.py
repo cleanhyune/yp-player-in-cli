@@ -150,14 +150,17 @@ def check_mpv() -> bool:
 
 
 def _ytdlp_path() -> str:
-    """Prefer the yt-dlp bundled alongside this interpreter (e.g. Homebrew venv),
-    then a Homebrew-managed yt-dlp, which is kept newer than pip's py3.9 build."""
-    bundled = os.path.join(os.path.dirname(sys.executable), "yt-dlp")
-    if os.path.exists(bundled):
-        return bundled
+    """Prefer a standalone Homebrew-managed yt-dlp, which the user keeps up to
+    date via `brew upgrade` independently of yp's release cadence -- YouTube
+    extraction breaks and gets patched upstream often enough that this matters.
+    Fall back to the yt-dlp bundled alongside this interpreter (e.g. Homebrew's
+    yp venv), which is pinned at yp's build time and can lag behind."""
     for brew_path in ("/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp"):
         if os.path.exists(brew_path):
             return brew_path
+    bundled = os.path.join(os.path.dirname(sys.executable), "yt-dlp")
+    if os.path.exists(bundled):
+        return bundled
     return "yt-dlp"
 
 
