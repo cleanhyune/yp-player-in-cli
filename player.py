@@ -181,7 +181,7 @@ def play(url: str) -> str:
 
         subprocess.run(
             ["mpv", "--no-video", "--ytdl-format=bestaudio/best",
-             "--msg-level=ao/coreaudio=error,ffmpeg=error",
+             "--msg-level=ao/coreaudio=error,ffmpeg=fatal",
              f"--script-opts=ytdl_hook-ytdl_path={_ytdlp_path()}",
              f"--volume={volume}",
              f"--script={lua.name}", url],

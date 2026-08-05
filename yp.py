@@ -33,8 +33,14 @@ def main():
         print("  brew install mpv")
         sys.exit(1)
 
-    query = get_first_query()
+    try:
+        _run(get_first_query())
+    except KeyboardInterrupt:
+        print("\n종료합니다.")
+        sys.exit(0)
 
+
+def _run(query: str):
     while query:
         print(f"\n'{query}' 검색 중...")
         try:
@@ -64,27 +70,26 @@ def main():
                 played_ids = {extract_video_id(result)}
                 thread, box = _start_prefetch(result, played_ids)
                 print("스트림 연결 중... (길이에 따라 수 초 걸릴 수 있습니다)")
-                reason = play(result)
-                while reason == "eof" and is_autoplay_enabled():
-                    if thread is None:
-                        break
-                    thread.join()
-                    next_video = box.get("result")
-                    if next_video is None:
-                        break
-                    result = next_video["url"]
-                    played_ids.add(extract_video_id(result))
-                    print(f"🔁 자동재생: {next_video['title']} · {next_video['channel']}")
-                    thread, box = _start_prefetch(result, played_ids)
+                try:
                     reason = play(result)
+                    while reason == "eof" and is_autoplay_enabled():
+                        if thread is None:
+                            break
+                        thread.join()
+                        next_video = box.get("result")
+                        if next_video is None:
+                            break
+                        result = next_video["url"]
+                        played_ids.add(extract_video_id(result))
+                        print(f"🔁 자동재생: {next_video['title']} · {next_video['channel']}")
+                        thread, box = _start_prefetch(result, played_ids)
+                        reason = play(result)
+                except KeyboardInterrupt:
+                    print("\n재생을 중단합니다.")
                 print()
                 query = questionary.text("다음 검색어 (엔터로 종료):").ask() or ""
                 break
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n종료합니다.")
-        sys.exit(0)
+    main()
