@@ -1,4 +1,7 @@
 from unittest.mock import patch
+
+import questionary
+
 from selector import format_duration, select_video, NEXT_PAGE, PREV_PAGE
 
 def test_format_duration_seconds():
@@ -72,7 +75,12 @@ def test_select_video_shows_only_10_items_per_page():
         mock_select.return_value.ask.return_value = None
         select_video(videos, page=2, max_pages=3)
         call_choices = mock_select.call_args[1]["choices"]
-    video_choices = [c for c in call_choices if c not in ("◀ 이전 페이지", "다음 페이지 ▶")]
-    assert len(video_choices) == 10
-    assert "영상10 · 채널 [1:40]" in video_choices
-    assert "영상19 · 채널 [1:40]" in video_choices
+    video_values = [
+        c.value if isinstance(c, questionary.Choice) else c
+        for c in call_choices
+        if not isinstance(c, questionary.Separator)
+        and c not in ("◀ 이전 페이지", "다음 페이지 ▶")
+    ]
+    assert len(video_values) == 10
+    assert "영상10 · 채널 [1:40]" in video_values
+    assert "영상19 · 채널 [1:40]" in video_values
