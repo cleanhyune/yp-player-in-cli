@@ -186,6 +186,7 @@ def play(url: str) -> str:
             ["mpv", "--no-video", "--ytdl-format=bestaudio/best",
              "--msg-level=ao/coreaudio=error,ffmpeg=fatal",
              f"--script-opts=ytdl_hook-ytdl_path={_ytdlp_path()}",
+             "--ytdl-raw-options=extractor-args=youtube:player_client=web_embedded",
              f"--volume={volume}",
              f"--script={lua.name}", url],
             check=False,
