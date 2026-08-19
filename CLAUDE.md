@@ -26,15 +26,17 @@ comments.py   # Fetches top comments, shows them in a new terminal window (on-de
 
 ## Commands
 
+**로컬 개발은 `python3` 대신 `python3.11`(또는 3.10+)로 실행할 것.** macOS 기본/Xcode `python3`는 3.9.6인데, yt-dlp가 최근 릴리즈부터 Python 3.10+를 요구하기 시작해서 3.9 환경엔 2025.10.14가 pip으로 설치 가능한 마지막 버전으로 영구히 고정된다. YouTube는 추출 로직을 자주 바꾸고 yt-dlp가 그때그때 패치를 내는 구조라, 이 오래된 버전으로 로컬 테스트하면 "The page needs to be reloaded" 같은 간헐적 추출 에러를 실제보다 훨씬 자주 만나게 된다. `brew install python@3.11`로 설치 가능.
+
 ```bash
 # Run
-python3 yp.py "검색어"
+python3.11 yp.py "검색어"
 
 # Test
-python3 -m pytest tests/ -v
+python3.11 -m pytest tests/ -v
 
 # Install dependencies
-python3 -m pip install yt-dlp questionary pytest
+python3.11 -m pip install yt-dlp questionary pytest
 brew install mpv
 ```
 
@@ -65,6 +67,6 @@ fetch_next(url, played_ids) -> {"title", "channel", "url", "duration"} | None
 ## Demo GIFs
 
 `assets/demo-*.gif`는 `assets/demo-*.tape` ([vhs](https://github.com/charmbracelet/vhs)) 스크립트로 생성됨. 재생성 시:
-- `brew install vhs`, 검색어는 실제 업로드 영상만 나오는 걸로 (라이브 방송/과거 라이브 아카이브는 이 환경에서 HLS 스트림 오픈이 잘 실패함 — `python3 -c "from searcher import search; ..."`로 먼저 결과를 확인하고 `duration`이 있는 항목을 고를 것)
+- `brew install vhs`, 검색어는 실제 업로드 영상만 나오는 걸로 (라이브 방송/과거 라이브 아카이브는 이 환경에서 HLS 스트림 오픈이 잘 실패함 — `python3.11 -c "from searcher import search; ..."`로 먼저 결과를 확인하고 `duration`이 있는 항목을 고를 것)
 - 녹화 중 실제로 오디오가 재생되므로 `/tmp/yp_volume`을 임시로 `0`으로 덮어써서 음소거한 뒤 복원
 - `vhs assets/demo-X.tape` 실행 → `assets/demo-X.gif` 생성
