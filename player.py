@@ -164,6 +164,15 @@ def _ytdlp_path() -> str:
     return "yt-dlp"
 
 
+_PLAYER_CLIENTS = ("web_embedded", "android")
+_BASE_MSG_LEVEL = "ao/coreaudio=error,ffmpeg=fatal"
+# mpv writes "Failed to open ...", stream errors, and ytdl_hook errors to
+# stdout (not stderr), so a failed-but-retried attempt must be silenced via
+# --msg-level, not by redirecting a stream. Left at _BASE_MSG_LEVEL on the
+# final attempt so a genuine failure still surfaces for debugging.
+_RETRY_MSG_LEVEL = _BASE_MSG_LEVEL + ",stream=fatal,cplayer=no,ytdl_hook=fatal,demux=fatal"
+
+
 def play(url: str) -> str:
     volume = _load_volume()
     project_dir = os.path.dirname(os.path.abspath(__file__))
@@ -182,17 +191,24 @@ def play(url: str) -> str:
         lua.write(_SEEK_SCRIPT + _COMMENTS_BINDING_TEMPLATE.format(python=sys.executable, helper=helper.name))
         lua.close()
 
-        subprocess.run(
-            ["mpv", "--no-video", "--ytdl-format=bestaudio/best",
-             "--msg-level=ao/coreaudio=error,ffmpeg=fatal",
-             f"--script-opts=ytdl_hook-ytdl_path={_ytdlp_path()}",
-             "--ytdl-raw-options=extractor-args=youtube:player_client=web_embedded",
-             f"--volume={volume}",
-             f"--script={lua.name}", url],
-            check=False,
-        )
+        reason = "error"
+        for index, client in enumerate(_PLAYER_CLIENTS):
+            has_fallback_remaining = index < len(_PLAYER_CLIENTS) - 1
+            msg_level = _RETRY_MSG_LEVEL if has_fallback_remaining else _BASE_MSG_LEVEL
+            subprocess.run(
+                ["mpv", "--no-video", "--ytdl-format=bestaudio/best",
+                 f"--msg-level={msg_level}",
+                 f"--script-opts=ytdl_hook-ytdl_path={_ytdlp_path()}",
+                 f"--ytdl-raw-options=extractor-args=youtube:player_client={client}",
+                 f"--volume={volume}",
+                 f"--script={lua.name}", url],
+                check=False,
+            )
+            reason = _load_reason()
+            if reason != "error":
+                break
     finally:
         os.unlink(lua.name)
         os.unlink(helper.name)
 
-    return _load_reason()
+    return reason
