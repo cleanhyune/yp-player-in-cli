@@ -5,7 +5,7 @@ warnings.filterwarnings("ignore")
 import questionary
 from searcher import search
 from selector import select_video, NEXT_PAGE, PREV_PAGE
-from player import play, check_mpv, is_autoplay_enabled
+from player import play, check_mpv, is_autoplay_enabled, notify_next_video
 from related import fetch_next, extract_video_id
 
 
@@ -19,10 +19,14 @@ def _start_prefetch(url, played_ids):
     if not is_autoplay_enabled():
         return None, None
     box = {}
-    thread = threading.Thread(
-        target=lambda: box.__setitem__("result", fetch_next(url, set(played_ids))),
-        daemon=True,
-    )
+
+    def worker():
+        next_video = fetch_next(url, set(played_ids))
+        box["result"] = next_video
+        if next_video:
+            notify_next_video(f"다음 자동재생: {next_video['title']} · {next_video['channel']}")
+
+    thread = threading.Thread(target=worker, daemon=True)
     thread.start()
     return thread, box
 

@@ -1,12 +1,16 @@
+import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 _VOLUME_FILE = "/tmp/yp_volume"
 _REASON_FILE = "/tmp/yp_last_reason"
 _AUTOPLAY_FILE = "/tmp/yp_autoplay"
+_IPC_SOCKET = "/tmp/yp_mpv_socket"
 
 _SEEK_SCRIPT = """\
 local input = require("mp.input")
@@ -181,6 +185,10 @@ def play(url: str) -> str:
         os.remove(_REASON_FILE)
     except FileNotFoundError:
         pass
+    try:
+        os.remove(_IPC_SOCKET)
+    except FileNotFoundError:
+        pass
 
     helper = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False)
     lua = tempfile.NamedTemporaryFile(mode="w", suffix=".lua", delete=False)
@@ -201,6 +209,7 @@ def play(url: str) -> str:
                  f"--script-opts=ytdl_hook-ytdl_path={_ytdlp_path()}",
                  f"--ytdl-raw-options=extractor-args=youtube:player_client={client}",
                  f"--volume={volume}",
+                 f"--input-ipc-server={_IPC_SOCKET}",
                  f"--script={lua.name}", url],
                 check=False,
             )
@@ -212,3 +221,32 @@ def play(url: str) -> str:
         os.unlink(helper.name)
 
     return reason
+
+
+def notify_next_video(text: str, timeout: float = 5.0) -> None:
+    """재생 중인 mpv 인스턴스의 IPC 소켓으로 OSD 메시지를 띄운다.
+
+    자동재생용 다음 영상 조회(related.fetch_next)는 백그라운드 스레드에서
+    비동기로 끝나므로, mpv가 소켓을 아직 만들지 않았을 수 있다 -- 짧게
+    재시도하다가 timeout 안에 못 붙으면(예: 영상이 너무 짧아 이미 재생이
+    끝난 경우) 조용히 포기한다. OSD 안내는 부가 기능일 뿐 핵심 재생 흐름을
+    막아서는 안 된다.
+    """
+    payload = json.dumps({"command": ["show-text", text, 6000]}, ensure_ascii=False) + "\n"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(1)
+                sock.connect(_IPC_SOCKET)
+                sock.sendall(payload.encode("utf-8"))
+                try:
+                    # mpv always writes a JSON ack back for every IPC command;
+                    # closing before it does causes a "Write error (Broken
+                    # pipe)" line to print on mpv's side, so drain it first.
+                    sock.recv(4096)
+                except OSError:
+                    pass
+                return
+        except OSError:
+            time.sleep(0.2)
