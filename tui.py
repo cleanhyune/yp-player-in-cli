@@ -36,8 +36,22 @@ def parse_keys(buf: bytes) -> list[str]:
                     i += len(seq)
                     break
             else:
-                keys.append("ESC")
-                i += 1
+                nxt = buf[i + 1:i + 2]
+                if nxt == b"[":
+                    # 알 수 없는 CSI 시퀀스: 파라미터/중간 바이트(0x20-0x3F)를
+                    # 지나 최종 바이트(0x40-0x7E)까지 통째로 소비하고 아무 키도 내지 않는다.
+                    j = i + 2
+                    while j < len(buf) and 0x20 <= buf[j] <= 0x3F:
+                        j += 1
+                    if j < len(buf) and 0x40 <= buf[j] <= 0x7E:
+                        j += 1
+                    i = j
+                elif nxt == b"O":
+                    # 알 수 없는 SS3 시퀀스: ESC, O, 그 다음 바이트까지 소비한다.
+                    i = min(i + 3, len(buf))
+                else:
+                    keys.append("ESC")
+                    i += 1
             continue
         single = buf[i:i + 1]
         if single in _SINGLE_BYTES:
@@ -80,16 +94,22 @@ def format_status(state: dict, width: int) -> str:
     icon = "⏸" if state.get("paused") else "▶"
     pos = format_duration(state.get("position") or 0)
     dur = format_duration(state.get("duration") or 0)
-    parts = [
+    fixed_parts = [
         f"{icon} {pos} / {dur}",
         f"vol {int(state.get('volume') or 0)}",
         "자동재생 " + ("켜짐" if state.get("autoplay") else "꺼짐"),
     ]
-    if state.get("autoplay") and state.get("next_hint"):
-        parts.append(f"다음: {state['next_hint']}")
     if state.get("message"):
-        parts.append(str(state["message"]))
-    return truncate("  ".join(parts), width)
+        fixed_parts.append(str(state["message"]))
+    fixed_joined = "  ".join(fixed_parts)
+
+    if state.get("autoplay") and state.get("next_hint"):
+        remaining = width - display_width(fixed_joined) - len("  다음: ")
+        if remaining >= 8:
+            hint = truncate(str(state["next_hint"]), remaining)
+            fixed_joined += f"  다음: {hint}"
+
+    return truncate(fixed_joined, width)
 
 
 class Pager:
@@ -143,7 +163,7 @@ class LinePrompt:
 def parse_timecode(s: str) -> int | None:
     """4자리 = MMSS, 5~6자리 = (H)HMMSS. 콜론은 무시. 예: 0710 -> 430, 012930 -> 5370."""
     digits = s.strip().replace(":", "")
-    if not digits.isdigit():
+    if not (digits.isascii() and digits.isdigit()):
         return None
     if len(digits) == 3:
         digits = "0" + digits
