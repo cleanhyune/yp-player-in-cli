@@ -79,7 +79,10 @@ def fetch_next(url: str, played_ids: set[str], current_channel: str | None = Non
             content_id = lockup.get("contentId")
             if not content_id or content_id in played_ids:
                 continue
-            candidates.append(_lockup_to_video(lockup))
+            try:
+                candidates.append(_lockup_to_video(lockup))
+            except Exception:
+                continue
     except Exception:
         return None
 
