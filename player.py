@@ -79,6 +79,7 @@ class PlayerSession:
         self._last_position_cb = 0.0
         self._last_draw = 0.0
         self._comments_thread: threading.Thread | None = None
+        self._load_generation = 0
 
     # ----- lifecycle -----
 
@@ -102,7 +103,9 @@ class PlayerSession:
                 self._client.observe(index, name)
             self._client.request_log_messages("error")
         except MpvError as e:
-            self._terminate_process()
+            # 아직 아무것도 재생하지 않은 idle mpv라 얌전히 기다릴 이유가 없다.
+            # 오류 메시지 뒤에 3초가 붙는 것을 막으려고 바로 죽인다.
+            self._terminate_process(kill=True)
             raise PlayerError(str(e))
         if self._tty:
             self._term = terminal_mode()
@@ -111,6 +114,9 @@ class PlayerSession:
             self._keys.start()
 
     def quit(self) -> None:
+        # load()가 예외로 빠져나갔으면 대체 화면이 아직 켜져 있을 수 있다. 멱등하므로
+        # 정상 경로에서 두 번 불려도 안전하고, 셸이 대체 화면에 갇히는 것을 막는다.
+        self._leave_screen()
         if self._keys is not None:
             self._keys.stop()
             self._keys = None
@@ -127,8 +133,12 @@ class PlayerSession:
             self._term = None
         self.closed = True
 
-    def _terminate_process(self) -> None:
+    def _terminate_process(self, kill: bool = False) -> None:
         if self._proc is None:
+            return
+        if kill:
+            self._proc.kill()
+            self._proc.wait()
             return
         try:
             self._proc.wait(timeout=3)
@@ -143,21 +153,30 @@ class PlayerSession:
         self._url = url
         self._next_requested = False
         self.position = 0.0
+        # duration도 비운다. 안 비우면 다음 영상이 로드에 실패했을 때 이전 영상의
+        # 길이가 남아 그 값이 새 영상의 기록에 잘못 들어간다.
+        self.duration = 0.0
+        # 영상마다 세대를 올린다. 이전 영상의 댓글 스레드가 늦게 끝나 도착한
+        # comments-ready가 다음 영상 위에 페이저를 여는 것을 막는 표식이다.
+        self._load_generation += 1
         reason = "error"
-        for index, client in enumerate(_PLAYER_CLIENTS):
-            is_final = index == len(_PLAYER_CLIENTS) - 1
-            try:
-                self._client.command("set", "ytdl-raw-options",
-                                     f"extractor-args=youtube:player_client={client}")
-                self._client.command("set", "start", str(int(start)) if start else "none")
-                self._client.command("loadfile", url)
-            except MpvError:
-                reason = "error"
-                break
-            reason = self._wait_end(show_errors=is_final)
-            if reason != "error" or self.closed:
-                break
-        self._leave_screen()
+        try:
+            for index, client in enumerate(_PLAYER_CLIENTS):
+                is_final = index == len(_PLAYER_CLIENTS) - 1
+                try:
+                    self._client.command("set", "ytdl-raw-options",
+                                         f"extractor-args=youtube:player_client={client}")
+                    self._client.command("set", "start", str(int(start)) if start else "none")
+                    self._client.command("loadfile", url)
+                except MpvError:
+                    reason = "error"
+                    break
+                reason = self._wait_end(show_errors=is_final)
+                if reason != "error" or self.closed:
+                    break
+        finally:
+            # 예외(Ctrl-C 포함)로 빠져나가도 대체 화면에서 반드시 나온다.
+            self._leave_screen()
         return reason
 
     def _wait_end(self, show_errors: bool) -> str:
@@ -192,8 +211,12 @@ class PlayerSession:
             elif kind == "key":
                 self._on_key(str(ev.get("key")))
             elif kind == "comments-ready":
+                if ev.get("generation") != self._load_generation:
+                    continue  # 이전 영상의 댓글 — 버린다 (큐를 비우면 mpv-exited를 잃는다)
                 self._open_pager(ev["lines"])
             elif kind == "comments-failed":
+                if ev.get("generation") != self._load_generation:
+                    continue
                 self._flash("댓글을 불러올 수 없습니다")
             elif kind == "redraw":
                 self._redraw(force=True)
@@ -294,14 +317,15 @@ class PlayerSession:
             return
         assert self._client is not None
         url, title, events = self._url, self.title or self._url, self._client.events
+        gen = self._load_generation
 
         def worker():
             try:
                 comments = fetch_comments(url)
                 lines = format_comments(comments, title) if comments else [title, "", "댓글이 없습니다."]
-                events.put({"event": "comments-ready", "lines": lines})
+                events.put({"event": "comments-ready", "lines": lines, "generation": gen})
             except Exception:
-                events.put({"event": "comments-failed"})
+                events.put({"event": "comments-failed", "generation": gen})
 
         self._flash("댓글 불러오는 중...")
         self._comments_thread = threading.Thread(target=worker, daemon=True)

@@ -53,7 +53,10 @@ def _write_json(path: str, data: dict) -> None:
 
 def _items() -> list[dict]:
     items = _read_json(_history_path()).get("items")
-    return items if isinstance(items, list) else []
+    if not isinstance(items, list):
+        return []
+    # 손으로 편집된 파일에 dict가 아닌 원소가 섞여도 "깨진 파일 = 무시" 계약을 지킨다.
+    return [i for i in items if isinstance(i, dict)]
 
 
 def _save_items(items: list[dict]) -> None:
@@ -85,6 +88,17 @@ def record_position(video_id: str, seconds: float) -> None:
     for item in items:
         if item.get("id") == video_id:
             item["position"] = float(seconds)
+            _save_items(items)
+            return
+
+
+def record_duration(video_id: str, seconds: float) -> None:
+    """자동재생 항목은 duration을 모른 채로 기록된다. mpv가 관측한 실제 길이를
+    재생이 끝난 뒤 채워 넣어야 `yp -r` 목록과 이어보기 비율 가드가 제대로 동작한다."""
+    items = _items()
+    for item in items:
+        if item.get("id") == video_id:
+            item["duration"] = float(seconds)
             _save_items(items)
             return
 

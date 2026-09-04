@@ -120,14 +120,15 @@ def _play_session(video: dict) -> None:
     state = history.load_state()
     session = PlayerSession(volume=state["volume"], autoplay=state["autoplay"],
                             tty=sys.stdin.isatty())
-    try:
-        session.start()
-    except PlayerError as e:
-        print(f"mpv를 시작할 수 없습니다: {e}")
-        return
-
     played_ids: set = set()
     try:
+        # start()도 정리 범위 안에 둔다. 기동 중 Ctrl-C가 들어와도 finally가
+        # session.quit()을 돌려 고아 mpv와 복원되지 않은 cbreak 모드를 막는다.
+        try:
+            session.start()
+        except PlayerError as e:
+            print(f"mpv를 시작할 수 없습니다: {e}")
+            return
         while True:
             video_id = extract_video_id(video["url"])
             played_ids.add(video_id)
@@ -142,6 +143,10 @@ def _play_session(video: dict) -> None:
             print("스트림 연결 중... (길이에 따라 수 초 걸릴 수 있습니다)")
             reason = session.load(video["url"], start=start)
 
+            if session.duration > 0:
+                # 자동재생 항목은 duration 0으로 기록됐다. mpv가 관측한 실제 길이를
+                # 위치 정리보다 먼저 채워야 다음 실행의 이어보기 가드가 이를 본다.
+                history.record_duration(video_id, session.duration)
             if reason == "eof":
                 history.clear_position(video_id)
             elif session.position > 0:
