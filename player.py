@@ -1,152 +1,30 @@
-import json
+from __future__ import annotations
+
 import os
+import queue
 import shutil
-import socket
 import subprocess
 import sys
-import tempfile
+import threading
 import time
+from typing import Callable
 
-_VOLUME_FILE = "/tmp/yp_volume"
-_REASON_FILE = "/tmp/yp_last_reason"
-_AUTOPLAY_FILE = "/tmp/yp_autoplay"
+from comments import fetch_comments, format_comments
+from mpv_ipc import MpvClient, MpvError
+from tui import (KeyReader, LinePrompt, Pager, draw_pager, draw_status, end_status,
+                 enter_alt_screen, exit_alt_screen, format_status, parse_timecode,
+                 terminal_mode, terminal_size)
+
 _IPC_SOCKET = "/tmp/yp_mpv_socket"
-
-_SEEK_SCRIPT = """\
-local input = require("mp.input")
-
-local function parse_timecode(s)
-    s = s:match("^%s*(.-)%s*$")
-    s = s:gsub(":", "")
-    if not s:match("^%d+$") then return nil end
-    local padded
-    if #s == 4 then
-        padded = "00" .. s
-    elseif #s == 5 then
-        padded = "0" .. s
-    elseif #s == 6 then
-        padded = s
-    else
-        return nil
-    end
-    local h = tonumber(padded:sub(1, 2))
-    local m = tonumber(padded:sub(3, 4))
-    local sec = tonumber(padded:sub(5, 6))
-    if m >= 60 or sec >= 60 then return nil end
-    return h * 3600 + m * 60 + sec
-end
-
-mp.add_key_binding("g", "seek-to-time", function()
-    input.get({
-        prompt = "이동할 시간 (0710 → 7:10 / 012930 → 1:29:30): ",
-        submit = function(text)
-            local secs = parse_timecode(text)
-            if secs then
-                mp.commandv("seek", tostring(secs), "absolute")
-                mp.osd_message(string.format("→ %02d:%02d:%02d",
-                    math.floor(secs / 3600),
-                    math.floor((secs % 3600) / 60),
-                    secs % 60), 2)
-            else
-                mp.osd_message("잘못된 형식 (예: 0710, 012930)", 2)
-            end
-        end
-    })
-end)
-
-mp.register_event("shutdown", function()
-    local vol = mp.get_property_number("volume", 100)
-    local f = io.open(os.getenv("YP_VOLUME_FILE") or "/tmp/yp_volume", "w")
-    if f then
-        f:write(tostring(math.floor(vol)))
-        f:close()
-    end
-end)
-
-mp.register_event("end-file", function(event)
-    local f = io.open("/tmp/yp_last_reason", "w")
-    if f then
-        f:write(event.reason or "unknown")
-        f:close()
-    end
-end)
-
-mp.add_key_binding("a", "toggle-autoplay", function()
-    local current = "1"
-    local f = io.open("/tmp/yp_autoplay", "r")
-    if f then
-        current = f:read("*l") or "1"
-        f:close()
-    end
-    local new_val = (current == "0") and "1" or "0"
-    local out = io.open("/tmp/yp_autoplay", "w")
-    if out then
-        out:write(new_val)
-        out:close()
-    end
-    mp.osd_message("자동재생: " .. (new_val == "1" and "켜짐" or "꺼짐"), 2)
-end)
-"""
-
-_COMMENTS_BINDING_TEMPLATE = """\
-
-mp.add_key_binding("t", "show-comments", function()
-    local url = mp.get_property("path")
-    local title = mp.get_property("media-title") or url
-    mp.commandv("run", "{python}", "{helper}", url, title)
-    mp.osd_message("댓글 불러오는 중...", 2)
-end)
-"""
-
-_COMMENTS_HELPER_TEMPLATE = """\
-import sys
-sys.path.insert(0, {project_dir!r})
-from comments import fetch_comments, open_comments_window
-
-url = sys.argv[1]
-title = sys.argv[2] if len(sys.argv) > 2 else 'YouTube'
-try:
-    comments = fetch_comments(url)
-    if comments:
-        open_comments_window(comments, title)
-except Exception:
-    import traceback
-    import os
-    import subprocess
-    import tempfile
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
-    tmp.write("댓글을 불러오는 중 오류가 발생했습니다:\\n" + traceback.format_exc())
-    tmp.close()
-    if os.environ.get("TMUX"):
-        subprocess.run(["tmux", "new-window", f"cat {{tmp.name}}; read; rm {{tmp.name}}"], check=False)
-    else:
-        script = f'tell application "Terminal" to do script "cat {{tmp.name}}; read; rm {{tmp.name}}"'
-        subprocess.run(["osascript", "-e", script], check=False)
-"""
+_PLAYER_CLIENTS = ("web_embedded", "android")
+_OBSERVED = ("time-pos", "pause", "volume", "duration", "media-title")
+_POSITION_INTERVAL = 10.0
+_REDRAW_INTERVAL = 0.5
+_MESSAGE_SECONDS = 3.0
 
 
-def _load_volume() -> int:
-    try:
-        with open(_VOLUME_FILE) as f:
-            return int(f.read().strip())
-    except (FileNotFoundError, ValueError):
-        return 100
-
-
-def _load_reason() -> str:
-    try:
-        with open(_REASON_FILE) as f:
-            return f.read().strip() or "unknown"
-    except FileNotFoundError:
-        return "unknown"
-
-
-def is_autoplay_enabled() -> bool:
-    try:
-        with open(_AUTOPLAY_FILE) as f:
-            return f.read().strip() != "0"
-    except FileNotFoundError:
-        return True
+class PlayerError(Exception):
+    pass
 
 
 def check_mpv() -> bool:
@@ -168,85 +46,311 @@ def _ytdlp_path() -> str:
     return "yt-dlp"
 
 
-_PLAYER_CLIENTS = ("web_embedded", "android")
-_BASE_MSG_LEVEL = "ao/coreaudio=error,ffmpeg=fatal"
-# mpv writes "Failed to open ...", stream errors, and ytdl_hook errors to
-# stdout (not stderr), so a failed-but-retried attempt must be silenced via
-# --msg-level, not by redirecting a stream. Left at _BASE_MSG_LEVEL on the
-# final attempt so a genuine failure still surfaces for debugging.
-_RETRY_MSG_LEVEL = _BASE_MSG_LEVEL + ",stream=fatal,cplayer=no,ytdl_hook=fatal,demux=fatal"
+class PlayerSession:
+    """재생 세션 하나 = mpv 프로세스 하나.
 
+    mpv는 --no-terminal --idle=yes로 소리만 내고, 키 입력·상태줄·댓글 페이저는 Python이
+    맡는다. MpvClient의 이벤트 큐 하나에 mpv 이벤트(end-file, property-change, log-message),
+    KeyReader의 키 이벤트, 댓글 스레드의 완료 이벤트가 모두 들어오고 load()가 그 큐를
+    소비한다. 상태가 한곳에 있어야 'n 뒤에 오는 end-file stop은 next다' 같은 해석이 안전하다.
+    """
 
-def play(url: str) -> str:
-    volume = _load_volume()
-    project_dir = os.path.dirname(os.path.abspath(__file__))
+    def __init__(self, volume: int = 100, autoplay: bool = True, tty: bool = True):
+        self.volume = volume
+        self.autoplay = autoplay
+        self.position = 0.0
+        self.duration = 0.0
+        self.paused = False
+        self.title = ""
+        self.closed = False
+        self._tty = tty
+        self._client: MpvClient | None = None
+        self._proc: subprocess.Popen | None = None
+        self._keys: KeyReader | None = None
+        self._term = None
+        self._url = ""
+        self._next_hint: str | None = None
+        self._message: str | None = None
+        self._message_until = 0.0
+        self._modal: Pager | LinePrompt | None = None
+        self._next_requested = False
+        self._quit_requested = False
+        self._position_cb: Callable[[float], None] | None = None
+        self._last_position_cb = 0.0
+        self._last_draw = 0.0
+        self._comments_thread: threading.Thread | None = None
 
-    try:
-        os.remove(_REASON_FILE)
-    except FileNotFoundError:
-        pass
-    try:
-        os.remove(_IPC_SOCKET)
-    except FileNotFoundError:
-        pass
+    # ----- lifecycle -----
 
-    helper = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False)
-    lua = tempfile.NamedTemporaryFile(mode="w", suffix=".lua", delete=False)
-    try:
-        helper.write(_COMMENTS_HELPER_TEMPLATE.format(project_dir=project_dir))
-        helper.close()
+    def start(self) -> None:
+        try:
+            os.remove(_IPC_SOCKET)
+        except FileNotFoundError:
+            pass
+        self._proc = subprocess.Popen(
+            ["mpv", "--no-video", "--no-terminal", "--idle=yes",
+             "--ytdl-format=bestaudio/best",
+             f"--script-opts=ytdl_hook-ytdl_path={_ytdlp_path()}",
+             f"--volume={self.volume}",
+             f"--input-ipc-server={_IPC_SOCKET}"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self._client = MpvClient(_IPC_SOCKET)
+        try:
+            self._client.connect(timeout=5.0)
+            for index, name in enumerate(_OBSERVED, start=1):
+                self._client.observe(index, name)
+            self._client.request_log_messages("error")
+        except MpvError as e:
+            self._terminate_process()
+            raise PlayerError(str(e))
+        if self._tty:
+            self._term = terminal_mode()
+            self._term.__enter__()
+            self._keys = KeyReader(sys.stdin.fileno(), self._client.events)
+            self._keys.start()
 
-        lua.write(_SEEK_SCRIPT + _COMMENTS_BINDING_TEMPLATE.format(python=sys.executable, helper=helper.name))
-        lua.close()
+    def quit(self) -> None:
+        if self._keys is not None:
+            self._keys.stop()
+            self._keys = None
+        if self._client is not None and not self._client.closed and not self.closed:
+            try:
+                self._client.command("quit", timeout=1.0)
+            except MpvError:
+                pass
+        self._terminate_process()
+        if self._client is not None:
+            self._client.close()
+        if self._term is not None:
+            self._term.__exit__(None, None, None)
+            self._term = None
+        self.closed = True
 
+    def _terminate_process(self) -> None:
+        if self._proc is None:
+            return
+        try:
+            self._proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait()
+
+    # ----- playback -----
+
+    def load(self, url: str, start: float | None = None) -> str:
+        assert self._client is not None
+        self._url = url
+        self._next_requested = False
+        self.position = 0.0
         reason = "error"
         for index, client in enumerate(_PLAYER_CLIENTS):
-            has_fallback_remaining = index < len(_PLAYER_CLIENTS) - 1
-            msg_level = _RETRY_MSG_LEVEL if has_fallback_remaining else _BASE_MSG_LEVEL
-            subprocess.run(
-                ["mpv", "--no-video", "--ytdl-format=bestaudio/best",
-                 f"--msg-level={msg_level}",
-                 f"--script-opts=ytdl_hook-ytdl_path={_ytdlp_path()}",
-                 f"--ytdl-raw-options=extractor-args=youtube:player_client={client}",
-                 f"--volume={volume}",
-                 f"--input-ipc-server={_IPC_SOCKET}",
-                 f"--script={lua.name}", url],
-                check=False,
-            )
-            reason = _load_reason()
-            if reason != "error":
+            is_final = index == len(_PLAYER_CLIENTS) - 1
+            try:
+                self._client.command("set", "ytdl-raw-options",
+                                     f"extractor-args=youtube:player_client={client}")
+                self._client.command("set", "start", str(int(start)) if start else "none")
+                self._client.command("loadfile", url)
+            except MpvError:
+                reason = "error"
                 break
-    finally:
-        os.unlink(lua.name)
-        os.unlink(helper.name)
+            reason = self._wait_end(show_errors=is_final)
+            if reason != "error" or self.closed:
+                break
+        self._leave_screen()
+        return reason
 
-    return reason
+    def _wait_end(self, show_errors: bool) -> str:
+        assert self._client is not None
+        self._redraw(force=True)
+        while True:
+            try:
+                ev = self._client.events.get(timeout=0.5)
+            except queue.Empty:
+                self._redraw()
+                continue
+            kind = ev.get("event")
+            if kind == "mpv-exited":
+                self.closed = True
+                return "quit" if self._quit_requested else "error"
+            if kind == "end-file":
+                reason = ev.get("reason")
+                if reason == "eof":
+                    return "eof"
+                if reason == "error":
+                    return "error"
+                if reason == "quit":
+                    return "quit"
+                if reason == "stop":
+                    return "next" if self._next_requested else "quit"
+                continue  # redirect / unknown 은 무시
+            if kind == "property-change":
+                self._on_property(ev.get("name"), ev.get("data"))
+            elif kind == "log-message":
+                if show_errors and self._modal is None:
+                    self._print_line(f"[mpv] {ev.get('prefix')}: {str(ev.get('text', '')).rstrip()}")
+            elif kind == "key":
+                self._on_key(str(ev.get("key")))
+            elif kind == "comments-ready":
+                self._open_pager(ev["lines"])
+            elif kind == "comments-failed":
+                self._flash("댓글을 불러올 수 없습니다")
+            elif kind == "redraw":
+                self._redraw(force=True)
+                continue
+            self._redraw()
 
+    def _on_property(self, name, data) -> None:
+        if name == "time-pos":
+            if data is None:
+                return  # 파일 종료 직전에 오는 null은 마지막 위치를 지우지 않도록 무시
+            self.position = float(data)
+            now = time.monotonic()
+            if self._position_cb is not None and now - self._last_position_cb >= _POSITION_INTERVAL:
+                self._last_position_cb = now
+                self._position_cb(self.position)
+        elif name == "duration":
+            self.duration = float(data or 0)
+        elif name == "pause":
+            self.paused = bool(data)
+        elif name == "volume":
+            if data is not None:
+                self.volume = int(round(float(data)))
+        elif name == "media-title":
+            self.title = str(data or "")
 
-def notify_next_video(text: str, timeout: float = 5.0) -> None:
-    """재생 중인 mpv 인스턴스의 IPC 소켓으로 OSD 메시지를 띄운다.
+    def on_position(self, callback: Callable[[float], None]) -> None:
+        self._position_cb = callback
+        self._last_position_cb = 0.0
 
-    자동재생용 다음 영상 조회(related.fetch_next)는 백그라운드 스레드에서
-    비동기로 끝나므로, mpv가 소켓을 아직 만들지 않았을 수 있다 -- 짧게
-    재시도하다가 timeout 안에 못 붙으면(예: 영상이 너무 짧아 이미 재생이
-    끝난 경우) 조용히 포기한다. OSD 안내는 부가 기능일 뿐 핵심 재생 흐름을
-    막아서는 안 된다.
-    """
-    payload = json.dumps({"command": ["show-text", text, 6000]}, ensure_ascii=False) + "\n"
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    def set_next_hint(self, text: str | None) -> None:
+        """prefetch 스레드에서 호출된다. 화면 출력은 메인 루프만 하므로 redraw 이벤트로 넘긴다."""
+        self._next_hint = text
+        if self._client is not None:
+            self._client.events.put({"event": "redraw"})
+
+    # ----- keys -----
+
+    def _on_key(self, key: str) -> None:
+        if self._modal is not None:
+            self._modal_key(key)
+            return
+        if key == "q":
+            self._quit_requested = True
+            self._send("quit", timeout=1.0)
+        elif key == "n":
+            self._next_requested = True
+            self._send("stop")
+        elif key == "a":
+            self.autoplay = not self.autoplay
+            self._flash("자동재생 " + ("켜짐" if self.autoplay else "꺼짐"))
+        elif key == "g":
+            self._modal = LinePrompt("이동할 시간 (0710 → 7:10 / 012930 → 1:29:30): ")
+            if self._tty:
+                draw_status(self._modal.render())
+        elif key == "t":
+            self._request_comments()
+        else:
+            self._send("keypress", key)
+
+    def _send(self, *args, timeout: float = 5.0) -> None:
+        assert self._client is not None
         try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-                sock.settimeout(1)
-                sock.connect(_IPC_SOCKET)
-                sock.sendall(payload.encode("utf-8"))
-                try:
-                    # mpv always writes a JSON ack back for every IPC command;
-                    # closing before it does causes a "Write error (Broken
-                    # pipe)" line to print on mpv's side, so drain it first.
-                    sock.recv(4096)
-                except OSError:
-                    pass
+            self._client.command(*args, timeout=timeout)
+        except MpvError:
+            pass
+
+    def _modal_key(self, key: str) -> None:
+        modal = self._modal
+        if isinstance(modal, Pager):
+            _, rows = terminal_size()
+            if modal.handle_key(key, max(1, rows - 1)):
+                self._modal = None
+                if self._tty:
+                    exit_alt_screen(sys.stdout)
+                self._redraw(force=True)
+            elif self._tty:
+                draw_pager(modal, sys.stdout)
+            return
+        if isinstance(modal, LinePrompt):
+            state = modal.handle_key(key)
+            if state == "pending":
+                if self._tty:
+                    draw_status(modal.render())
                 return
-        except OSError:
-            time.sleep(0.2)
+            self._modal = None
+            if state == "submit":
+                seconds = parse_timecode(modal.text)
+                if seconds is None:
+                    self._flash("잘못된 형식 (예: 0710, 012930)")
+                else:
+                    self._send("seek", str(seconds), "absolute")
+            self._redraw(force=True)
+
+    # ----- comments -----
+
+    def _request_comments(self) -> None:
+        if self._comments_thread is not None and self._comments_thread.is_alive():
+            return
+        assert self._client is not None
+        url, title, events = self._url, self.title or self._url, self._client.events
+
+        def worker():
+            try:
+                comments = fetch_comments(url)
+                lines = format_comments(comments, title) if comments else [title, "", "댓글이 없습니다."]
+                events.put({"event": "comments-ready", "lines": lines})
+            except Exception:
+                events.put({"event": "comments-failed"})
+
+        self._flash("댓글 불러오는 중...")
+        self._comments_thread = threading.Thread(target=worker, daemon=True)
+        self._comments_thread.start()
+
+    def _open_pager(self, lines: list[str]) -> None:
+        if not self._tty:
+            return
+        self._modal = Pager(lines)
+        enter_alt_screen(sys.stdout)
+        draw_pager(self._modal, sys.stdout)
+
+    # ----- screen -----
+
+    def _flash(self, text: str) -> None:
+        self._message = text
+        self._message_until = time.monotonic() + _MESSAGE_SECONDS
+        self._redraw(force=True)
+
+    def _state(self) -> dict:
+        if self._message and time.monotonic() > self._message_until:
+            self._message = None
+        return {"position": self.position, "duration": self.duration, "paused": self.paused,
+                "volume": self.volume, "autoplay": self.autoplay,
+                "next_hint": self._next_hint, "message": self._message}
+
+    def _redraw(self, force: bool = False) -> None:
+        if not self._tty or self._modal is not None:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_draw < _REDRAW_INTERVAL:
+            return
+        self._last_draw = now
+        cols, _ = terminal_size()
+        draw_status(format_status(self._state(), cols))
+
+    def _print_line(self, text: str) -> None:
+        if self._tty:
+            end_status()
+            sys.stdout.write(text + "\n")
+            sys.stdout.flush()
+            self._redraw(force=True)
+        else:
+            print(text)
+
+    def _leave_screen(self) -> None:
+        """load()가 끝날 때 상태줄/페이저를 정리해 다음 print가 깨끗한 줄에 찍히게 한다."""
+        if self._tty:
+            if isinstance(self._modal, Pager):
+                exit_alt_screen(sys.stdout)
+            end_status()
+        self._modal = None
