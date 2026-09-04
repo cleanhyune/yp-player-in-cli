@@ -177,3 +177,121 @@ def parse_timecode(s: str) -> int | None:
     if m >= 60 or sec >= 60:
         return None
     return h * 3600 + m * 60 + sec
+
+
+@contextmanager
+def terminal_mode(fd: int | None = None):
+    """cbreak 모드로 들어간다. raw가 아니라 cbreak인 이유는 Ctrl+C가 KeyboardInterrupt로
+    살아 있어야 기존 '재생을 중단합니다' 흐름이 유지되기 때문이다."""
+    if fd is None:
+        fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+def _ends_with_partial_escape(buf: bytes) -> bool:
+    """buf가 아직 끝나지 않은 이스케이프 시퀀스로 끝나는지 판단한다.
+
+    읽기 경계가 CSI/SS3 시퀀스 중간에 떨어지면 다음 read를 기다려 이어붙여야
+    시퀀스를 잃어버리지 않는다 (그렇지 않으면 최종 바이트만 평범한 키로 새어 나간다).
+    """
+    idx = buf.rfind(b"\x1b")
+    if idx == -1:
+        return False
+    tail = buf[idx:]
+    if tail == b"\x1b":
+        return True
+    second = tail[1:2]
+    if second == b"[":
+        j = 2
+        while j < len(tail) and 0x20 <= tail[j] <= 0x3F:
+            j += 1
+        if j < len(tail) and 0x40 <= tail[j] <= 0x7E:
+            return False
+        return True
+    if second == b"O":
+        return len(tail) < 3
+    return False
+
+
+class KeyReader:
+    """stdin을 select로 폴링해 키 이벤트 {"event": "key", "key": name}를 큐에 넣는 스레드."""
+
+    def __init__(self, fd: int, events, poll_interval: float = 0.2):
+        self._fd = fd
+        self._events = events
+        self._poll = poll_interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select([self._fd], [], [], self._poll)
+            except (OSError, ValueError):
+                return
+            if not ready:
+                continue
+            try:
+                buf = os.read(self._fd, 64)
+            except OSError:
+                return
+            if not buf:
+                return
+            while _ends_with_partial_escape(buf):
+                # 이스케이프 시퀀스가 아직 끝나지 않았다: 다음 조각을 잠깐 기다려 이어붙인다.
+                ready, _, _ = select.select([self._fd], [], [], 0.05)
+                if not ready:
+                    break
+                more = os.read(self._fd, 64)
+                if not more:
+                    break
+                buf += more
+            for key in parse_keys(buf):
+                self._events.put({"event": "key", "key": key})
+
+
+def terminal_size() -> os.terminal_size:
+    return shutil.get_terminal_size((80, 24))
+
+
+def draw_status(text: str, out=sys.stdout) -> None:
+    out.write("\r\x1b[2K" + text)
+    out.flush()
+
+
+def end_status(out=sys.stdout) -> None:
+    """상태줄을 지운다. 줄바꿈을 넣지 않으므로 다음 print가 그 자리에 찍힌다."""
+    out.write("\r\x1b[2K")
+    out.flush()
+
+
+def enter_alt_screen(out=sys.stdout) -> None:
+    out.write("\x1b[?1049h\x1b[H")
+    out.flush()
+
+
+def exit_alt_screen(out=sys.stdout) -> None:
+    out.write("\x1b[?1049l")
+    out.flush()
+
+
+def draw_pager(pager: Pager, out=sys.stdout) -> None:
+    cols, rows = terminal_size()
+    height = max(1, rows - 1)
+    body = [truncate(line, cols) for line in pager.visible(height)]
+    last = min(pager.top + height, len(pager.lines))
+    footer = f"-- {pager.top + 1}-{last}/{len(pager.lines)}  j/k 스크롤 · space 페이지 · q 닫기 --"
+    out.write("\x1b[2J\x1b[H" + "\r\n".join(body) + "\r\n" + truncate(footer, cols))
+    out.flush()
