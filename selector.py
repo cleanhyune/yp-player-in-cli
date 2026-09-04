@@ -4,6 +4,7 @@ import questionary
 
 NEXT_PAGE = "__next__"
 PREV_PAGE = "__prev__"
+NEW_SEARCH = "__new_search__"
 
 PAGE_SIZE = 10
 
@@ -66,4 +67,32 @@ def select_video(videos: list[dict], page: int = 1, max_pages: int = 3) -> str |
         return PREV_PAGE
     if chosen == "다음 페이지 ▶":
         return NEXT_PAGE
+    return label_to_url[chosen]
+
+
+def select_recent(items: list[dict]) -> str | None:
+    """최근 재생 목록에서 하나를 고른다. 맨 위의 '새로 검색'을 고르면 NEW_SEARCH를 반환."""
+    new_search_label = "🔍 새로 검색"
+    labels = [
+        f"{v['title']} · {v['channel']} [{format_duration(v['duration'])}]"
+        for v in items
+    ]
+    label_to_url = dict(zip(labels, (v["url"] for v in items)))
+
+    choices: list = [new_search_label]
+    for v, label in zip(items, labels):
+        choices.append(questionary.Separator(" "))
+        choices.append(questionary.Choice(
+            title=[
+                ("class:text", v["title"]),
+                ("class:choice-channel", f" · {v['channel']} [{format_duration(v['duration'])}]"),
+            ],
+            value=label,
+        ))
+
+    chosen = questionary.select("최근 재생:", choices=choices, style=_STYLE).ask()
+    if chosen is None:
+        return None
+    if chosen == new_search_label:
+        return NEW_SEARCH
     return label_to_url[chosen]

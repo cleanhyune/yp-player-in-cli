@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
-import tempfile
 
 # Must be set before yt_dlp is imported: a user's globally-installed yt-dlp
 # plugin (e.g. a broken PO-token provider under ~/.config/yt-dlp/plugins/)
@@ -38,48 +36,30 @@ def fetch_comments(url: str, limit: int = 100) -> list[dict]:
     return result
 
 
-def open_comments_window(comments: list[dict], title: str) -> None:
+def _wrap(text: str, width: int, indent: str) -> list[str]:
+    lines = []
+    for paragraph in text.splitlines() or [""]:
+        while True:
+            lines.append(indent + paragraph[:width])
+            paragraph = paragraph[width:]
+            if not paragraph:
+                break
+    return lines
+
+
+def format_comments(comments: list[dict], title: str) -> list[str]:
+    """댓글 목록을 페이저에 그릴 줄 목록으로 만든다. 답글은 한 단계 들여쓴다."""
     lines = [title, "━" * 44, ""]
     for i, c in enumerate(comments, 1):
-        like = f" | 좋아요 {c['like_count']:,}" if c["like_count"] else ""
-        is_reply = c.get("parent", "root") != "root"
-        
-        if is_reply:
-            lines.append(f"     └─ {c['author']}{like}")
-            text = c["text"]
-            while text:
-                lines.append(f"        {text[:72]}")
-                text = text[72:]
+        like_count = c.get("like_count") or 0
+        like = f" | 좋아요 {like_count:,}" if like_count else ""
+        author = c.get("author") or "알 수 없음"
+        text = c.get("text") or ""
+        if c.get("parent", "root") != "root":
+            lines.append(f"     └─ {author}{like}")
+            lines.extend(_wrap(text, 72, "        "))
         else:
-            lines.append(f" {i:2}. {c['author']}{like}")
-            text = c["text"]
-            while text:
-                lines.append(f"     {text[:76]}")
-                text = text[76:]
+            lines.append(f" {i:2}. {author}{like}")
+            lines.extend(_wrap(text, 76, "     "))
         lines.append("")
-    lines.append("(엔터로 창 닫기)")
-
-    content = "\n".join(lines)
-
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-    )
-    try:
-        tmp.write(content)
-        tmp.close()
-        if os.environ.get("TMUX"):
-            subprocess.run(
-                ["tmux", "new-window", f"cat {tmp.name}; read; rm {tmp.name}"],
-                check=False,
-            )
-        else:
-            script = (
-                f'tell application "Terminal" to do script '
-                f'"cat {tmp.name}; read; rm {tmp.name}"'
-            )
-            subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
-    except Exception:
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
+    return lines
