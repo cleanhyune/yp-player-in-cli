@@ -133,6 +133,7 @@ def _play_session(video: dict) -> None:
             played_ids.add(video_id)
             history.record_start(video)
             session.on_position(lambda seconds, _id=video_id: history.record_position(_id, seconds))
+            session.set_next_hint(None)
             prefetch = _Prefetch(video["url"], played_ids, video.get("channel"), session)
 
             start = history.resume_position(video_id, video.get("duration") or 0)
@@ -143,7 +144,7 @@ def _play_session(video: dict) -> None:
 
             if reason == "eof":
                 history.clear_position(video_id)
-            else:
+            elif session.position > 0:
                 history.record_position(video_id, session.position)
 
             if reason == "error":
@@ -165,7 +166,10 @@ def _play_session(video: dict) -> None:
     except KeyboardInterrupt:
         print("\n재생을 중단합니다.")
     finally:
-        history.save_state(session.volume, session.autoplay)
+        try:
+            history.save_state(session.volume, session.autoplay)
+        except Exception:
+            pass
         session.quit()
 
 
