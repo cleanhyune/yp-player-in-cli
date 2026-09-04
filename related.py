@@ -56,8 +56,12 @@ def _lockup_to_video(lockup: dict) -> dict:
     }
 
 
-def fetch_next(url: str, played_ids: set[str]) -> dict | None:
+def fetch_next(url: str, played_ids: set[str], current_channel: str | None = None) -> dict | None:
     """다음 자동재생 영상을 유튜브 워치 페이지의 '연관 동영상' 사이드바에서 찾는다.
+
+    같은 채널의 미재생 영상이 있으면 그것을 우선한다 — 예능/드라마 회차는 같은 공식
+    채널이 이어서 올리는 경우가 대부분이라 회차 연속 시청에 가장 잘 맞는다. 없으면
+    사이드바의 첫 미재생 항목을 고른다.
 
     yt-dlp는 이 목록을 공식적으로 지원하지 않으므로 워치 페이지 HTML에 내장된
     ytInitialData를 직접 파싱한다. 유튜브가 이 JSON 구조를 바꾸면 조용히 깨질 수
@@ -70,11 +74,19 @@ def fetch_next(url: str, played_ids: set[str]) -> dict | None:
 
     try:
         initial_data = _fetch_initial_data(video_id)
+        candidates = []
         for lockup in _iter_sidebar_videos(initial_data):
             content_id = lockup.get("contentId")
             if not content_id or content_id in played_ids:
                 continue
-            return _lockup_to_video(lockup)
+            candidates.append(_lockup_to_video(lockup))
     except Exception:
         return None
-    return None
+
+    if not candidates:
+        return None
+    if current_channel:
+        for video in candidates:
+            if video["channel"] == current_channel:
+                return video
+    return candidates[0]
