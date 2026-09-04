@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 import questionary
 
-from selector import format_duration, select_video, NEXT_PAGE, PREV_PAGE
+from selector import format_duration, select_video, NEXT_PAGE, PREV_PAGE, select_recent, NEW_SEARCH
 
 def test_format_duration_seconds():
     assert format_duration(90) == "1:30"
@@ -84,3 +84,34 @@ def test_select_video_shows_only_10_items_per_page():
     assert len(video_values) == 10
     assert "영상10 · 채널 [1:40]" in video_values
     assert "영상19 · 채널 [1:40]" in video_values
+
+
+def test_select_recent_returns_url_of_chosen():
+    items = [
+        {"title": "지난 영상", "channel": "채널", "url": "https://youtube.com/watch?v=abc", "duration": 100},
+    ]
+    with patch("selector.questionary.select") as mock_select:
+        mock_select.return_value.ask.return_value = "지난 영상 · 채널 [1:40]"
+        assert select_recent(items) == "https://youtube.com/watch?v=abc"
+
+
+def test_select_recent_returns_new_search_sentinel():
+    items = [{"title": "지난 영상", "channel": "채널", "url": "https://youtube.com/watch?v=abc", "duration": 100}]
+    with patch("selector.questionary.select") as mock_select:
+        mock_select.return_value.ask.return_value = "🔍 새로 검색"
+        assert select_recent(items) == NEW_SEARCH
+
+
+def test_select_recent_returns_none_when_cancelled():
+    with patch("selector.questionary.select") as mock_select:
+        mock_select.return_value.ask.return_value = None
+        assert select_recent([]) is None
+
+
+def test_select_recent_puts_new_search_first():
+    items = [{"title": "지난 영상", "channel": "채널", "url": "https://youtube.com/watch?v=abc", "duration": 100}]
+    with patch("selector.questionary.select") as mock_select:
+        mock_select.return_value.ask.return_value = None
+        select_recent(items)
+    choices = mock_select.call_args[1]["choices"]
+    assert choices[0] == "🔍 새로 검색"
