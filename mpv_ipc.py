@@ -24,7 +24,9 @@ class MpvClient:
 
     리더 스레드 하나가 소켓을 줄 단위로 읽는다. request_id가 있는 줄은 대기 중인
     command() 호출자에게, event가 있는 줄은 events 큐로 간다. 소켓이 끊기면 대기 중인
-    호출은 모두 MpvError로 깨우고 큐에 {"event": "mpv-exited"}를 한 번 넣는다.
+    호출은 모두 MpvError로 깨운다. 원격(mpv 프로세스)이 끊었을 때만 큐에
+    {"event": "mpv-exited"}를 한 번 넣는다 — close()로 직접 끊었을 때는 넣지 않아서,
+    소비자가 "내가 끊었다"와 "mpv가 죽었다"를 구분할 수 있다.
     """
 
     def __init__(self, socket_path: str):
@@ -36,6 +38,7 @@ class MpvClient:
         self._send_lock = threading.Lock()
         self._ids = itertools.count(1)
         self._closed = threading.Event()
+        self._closed_locally = False
 
     def connect(self, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + timeout
@@ -89,6 +92,8 @@ class MpvClient:
         self.command("request_log_messages", level)
 
     def close(self) -> None:
+        self._closed_locally = True
+        self._closed.set()
         sock = self._sock
         if sock is None:
             return
@@ -130,7 +135,8 @@ class MpvClient:
             for slot in pending:
                 slot.error = MpvError("mpv 연결이 닫혔습니다")
                 slot.event.set()
-            self.events.put({"event": "mpv-exited"})
+            if not self._closed_locally:
+                self.events.put({"event": "mpv-exited"})
 
     def _dispatch(self, msg: dict) -> None:
         if "request_id" in msg:
