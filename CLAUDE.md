@@ -5,23 +5,27 @@ CLI tool that searches YouTube and plays audio-only via mpv. macOS only.
 ## Structure
 
 ```
-yp.py         # Entry point, main search→select→play→autoplay loop
+yp.py         # Entry point: search→select→PlayerSession loop, autoplay chain, -r/--recent
 searcher.py   # YouTube search via yt-dlp YoutubeDL API
-selector.py   # Arrow-key selection UI via questionary
-player.py     # mpv subprocess wrapper, tracks mpv exit reason
-related.py    # Next-video lookup by parsing the watch page's related-video sidebar
-comments.py   # Fetches top comments, shows them in a new terminal window (on-demand, 't' key in mpv)
+selector.py   # Arrow-key selection UI via questionary (search results + recent history)
+player.py     # PlayerSession: one mpv process per playback session, driven over JSON IPC
+mpv_ipc.py    # mpv JSON IPC client (request/response matching + event queue). No yp knowledge
+tui.py        # Terminal ownership: cbreak key reader, status line, comments pager, timecode prompt
+history.py    # ~/.config/yp/history.json (recent + resume position) and state.json (volume, autoplay)
+related.py    # Next-video lookup by parsing the watch page's related-video sidebar; same-channel first
+comments.py   # Fetches top comments and formats them into pager lines ('t' key)
 ```
 
 ## Key Decisions
 
 - **yt-dlp Python API** (not subprocess) — `YoutubeDL` class with `extract_flat: True` for fast search without fetching full metadata
 - **`_SilentLogger`** in `searcher.py` — suppresses yt-dlp's Python version deprecation warnings
-- **mpv `--no-video --ytdl-format=bestaudio/best`** — audio-only streaming with a fallback format; mpv handles all keyboard controls natively (space, arrows, 9/0, q, `g` seek, `t` comments, `a` autoplay toggle)
-- **Lua seek script** — `_SEEK_SCRIPT` in `player.py`; written to a tempfile at runtime, passed via `--script`, deleted on exit. Binds `g` key to `mp.input.get()` for time-code input. Timecode format: 4 digits = MMSS, 5-6 digits = (H)HMMSS. Also registers an `end-file` handler that writes mpv's exit reason (`eof`/`stop`/`quit`/`error`) to `/tmp/yp_last_reason`, read back by `player._load_reason()`. Binds `a` to toggle autoplay, persisted to `/tmp/yp_autoplay` (`"0"`/`"1"`, default on), read back by `player.is_autoplay_enabled()`
 - **Autoplay via sidebar scraping, not yt-dlp** — `related.py` fetches the watch page HTML directly and parses the `ytInitialData` JSON blob for the real "related videos" sidebar (`lockupViewModel` entries under `contents.twoColumnWatchNextResults.secondaryResults...`). An earlier version used yt-dlp's `RD<video_id>` mix playlist, but that mix doesn't exist for many videos (e.g. broadcast/drama clips) — see [[autoplay_related_videos]] memory. yt-dlp deliberately doesn't expose this sidebar, so this parsing is unofficial and self-maintained: if YouTube changes the JSON shape, only fixing `related.py` (not `pip install -U yt-dlp`) will help. `fetch_next()` swallows every exception internally so a broken parse can never propagate into the autoplay loop
-- **Autoplay prefetch** — `yp.py`'s `_start_prefetch()` kicks off `related.fetch_next()` in a `daemon=True` background thread as soon as the current video starts playing, so the next video is usually already resolved by the time mpv hits EOF (no "다음 영상을 찾는 중..." pause). `played_ids` is snapshotted with `set(played_ids)` before handing it to the thread, since the main loop keeps mutating the original set concurrently
-- **Next-video OSD via mpv IPC** — `play()` launches mpv with `--input-ipc-server=/tmp/yp_mpv_socket` (stale socket removed before each launch, same pattern as `_REASON_FILE`). Once the prefetch thread's `fetch_next()` resolves (while the current video is still playing, since `subprocess.run` only blocks the main thread), it calls `player.notify_next_video()`, which connects to that Unix socket and sends a `show-text` JSON IPC command so the "다음 자동재생: ..." message appears as OSD over the *currently playing* video — not after it ends. mpv's terminal OSD works fine even with `--no-video` (already proven by the existing `a`-key autoplay-toggle message). `notify_next_video()` retries connecting for a few seconds since mpv may not have created the socket yet, and gives up silently on timeout — it's a nice-to-have, never allowed to block or crash the playback loop
+- **One mpv per playback session, Python owns the terminal** — `PlayerSession.start()` launches `mpv --no-video --no-terminal --idle=yes --input-ipc-server=/tmp/yp_mpv_socket` once; each video is a `loadfile` over IPC, so autoplay/`n` transitions have no process restart and volume/pause state survives. Because mpv has no terminal, `tui.KeyReader` reads stdin in cbreak mode (not raw — Ctrl+C must still raise `KeyboardInterrupt`) and forwards unknown keys to mpv via the `keypress` IPC command, so mpv's default bindings (space, arrows, 9/0, m) keep working. Intercepted keys: `q` quit, `n` next, `a` autoplay toggle, `g` timecode prompt, `t` comments pager. The status line and pager are drawn by Python; mpv's own OSD is never used
+- **Single event queue** — `MpvClient.events` receives mpv events, key events from `KeyReader`, `comments-ready/failed` from the comments thread, and `redraw` from the prefetch thread. `PlayerSession.load()` consumes only this queue. This is what makes "`end-file reason=stop` right after `n` means `next`, otherwise `quit`" a safe interpretation
+- **Per-file options via `set` before `loadfile`** — player-client fallback (`web_embedded` → `android`) and resume position are applied with `set ytdl-raw-options ...` / `set start <sec>|none` immediately before each `loadfile`, not as `loadfile` positional options (whose positional layout changed in mpv 0.38)
+- **No more /tmp state files or Lua** — volume and autoplay persist in `~/.config/yp/state.json`; playback history and resume positions in `history.json` (atomic write via `os.replace`). Resume applies when the saved position is ≥30s and <95% of duration. `time-pos` `null` at end-of-file is ignored so the last real position isn't wiped before it's recorded
+- **mpv errors surface via IPC** — `request_log_messages error`; log lines are printed only on the final fallback attempt (same effect as the old per-attempt `--msg-level`)
 - **`from __future__ import annotations`** in `selector.py`/`related.py`/`comments.py` — required for `str | None` syntax on Python 3.9
 - `duration` from yt-dlp is `float`, so `format_duration()` casts to `int` first
 
@@ -46,12 +50,16 @@ brew install mpv
 ```
 search(query) -> [{"title", "channel", "url", "duration"}, ...]  # 30개 한번에
 select_video(videos, page, max_pages) -> url | NEXT_PAGE | PREV_PAGE | None
-play(url) -> reason  (blocks until mpv exits; reason = "eof"/"stop"/"quit"/"error"/"unknown")
-is_autoplay_enabled() -> bool  ("a" 키로 토글, /tmp/yp_autoplay에 저장, 기본 True)
+select_recent(items) -> url | NEW_SEARCH | None
 
-# yp.py의 재생 분기: reason == "eof" and is_autoplay_enabled()인 동안 반복해 자동재생 체인을 이어감
-# 다음 영상 조회는 현재 영상 재생 시작 시점에 백그라운드 스레드로 미리 해둠(prefetch)
-fetch_next(url, played_ids) -> {"title", "channel", "url", "duration"} | None
+session = PlayerSession(volume, autoplay, tty); session.start()
+session.load(url, start) -> "eof" | "quit" | "next" | "error"   # blocks until the file ends
+session.autoplay / session.volume / session.position           # read after load()
+session.quit()
+
+# yp._play_session: reason이 "eof"(autoplay on) 또는 "next"인 동안 prefetch 결과로 load()를 반복
+fetch_next(url, played_ids, current_channel) -> {"title", "channel", "url"} | None   # 같은 채널 우선
+history.record_start / record_position / clear_position / resume_position / recent / load_state / save_state
 ```
 
 ## Distribution
@@ -69,5 +77,5 @@ fetch_next(url, played_ids) -> {"title", "channel", "url", "duration"} | None
 
 `assets/demo-*.gif`는 `assets/demo-*.tape` ([vhs](https://github.com/charmbracelet/vhs)) 스크립트로 생성됨. 재생성 시:
 - `brew install vhs`, 검색어는 실제 업로드 영상만 나오는 걸로 (라이브 방송/과거 라이브 아카이브는 이 환경에서 HLS 스트림 오픈이 잘 실패함 — `python3.11 -c "from searcher import search; ..."`로 먼저 결과를 확인하고 `duration`이 있는 항목을 고를 것)
-- 녹화 중 실제로 오디오가 재생되므로 `/tmp/yp_volume`을 임시로 `0`으로 덮어써서 음소거한 뒤 복원
+- 녹화 중 실제로 오디오가 재생되므로 `~/.config/yp/state.json`의 `"volume"`을 임시로 `0`으로 바꿔 음소거한 뒤 복원
 - `vhs assets/demo-X.tape` 실행 → `assets/demo-X.gif` 생성
