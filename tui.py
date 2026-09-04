@@ -234,6 +234,8 @@ class KeyReader:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=self._poll * 2)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -249,12 +251,18 @@ class KeyReader:
                 return
             if not buf:
                 return
-            while _ends_with_partial_escape(buf):
+            while not self._stop.is_set() and _ends_with_partial_escape(buf):
                 # 이스케이프 시퀀스가 아직 끝나지 않았다: 다음 조각을 잠깐 기다려 이어붙인다.
-                ready, _, _ = select.select([self._fd], [], [], 0.05)
+                try:
+                    ready, _, _ = select.select([self._fd], [], [], 0.05)
+                except (OSError, ValueError):
+                    return
                 if not ready:
                     break
-                more = os.read(self._fd, 64)
+                try:
+                    more = os.read(self._fd, 64)
+                except OSError:
+                    return
                 if not more:
                     break
                 buf += more
