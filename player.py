@@ -79,6 +79,7 @@ class PlayerSession:
         self._last_position_cb = 0.0
         self._last_draw = 0.0
         self._comments_thread: threading.Thread | None = None
+        self._comments_generation = 0
         self._status = StatusArea(sys.stdout)
         self._load_generation = 0
 
@@ -315,6 +316,10 @@ class PlayerSession:
 
     def _request_comments(self) -> None:
         if self._comments_thread is not None and self._comments_thread.is_alive():
+            if self._comments_generation != self._load_generation:
+                self._flash("이전 영상 댓글을 아직 불러오는 중입니다. 잠시 후 다시 눌러주세요")
+            else:
+                self._flash("댓글 불러오는 중...")
             return
         assert self._client is not None
         url, title, events = self._url, self.title or self._url, self._client.events
@@ -329,6 +334,7 @@ class PlayerSession:
                 events.put({"event": "comments-failed", "generation": gen})
 
         self._flash("댓글 불러오는 중...")
+        self._comments_generation = gen
         self._comments_thread = threading.Thread(target=worker, daemon=True)
         self._comments_thread.start()
 

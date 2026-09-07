@@ -19,14 +19,16 @@ def fetch_comments(url: str, limit: int = 100) -> list[dict]:
         "no_warnings": True,
         "logger": SilentLogger(),
         "getcomments": True,
-        "extractor_args": {"youtube": {"max_comments": [str(limit)], "comment_sort": ["top"]}},
+        # max_comments = [total, max_parents, max_replies, max_replies_per_thread]; 빈 값은 무제한.
+        # 총량이 아니라 최상위 댓글 수를 limit로 잡고, 스레드당 답글은 10개로 끊어 조회 시간을 묶어둔다.
+        "extractor_args": {"youtube": {"max_comments": ["", str(limit), "", "10"], "comment_sort": ["top"]}},
     }
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
     raw = info.get("comments") or []
     result = []
-    for c in raw[:limit]:
+    for c in raw:
         result.append({
             "author": c.get("author") or "알 수 없음",
             "text": c.get("text") or "",
