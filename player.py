@@ -16,7 +16,9 @@ from tui import (KeyReader, LinePrompt, Pager, StatusArea, draw_pager, enter_alt
                  terminal_size)
 
 _IPC_SOCKET = "/tmp/yp_mpv_socket"
-_PLAYER_CLIENTS = ("web_embedded", "android")
+# android가 현재 거의 모든 영상을 첫 시도에 열고(2~3초), web_embedded는 실패 후 폴백에 3~4초를
+# 더 쓰는 경우가 많아 android를 먼저 시도한다 (2026-09 측정).
+_PLAYER_CLIENTS = ("android", "web_embedded")
 _OBSERVED = ("time-pos", "pause", "volume", "duration", "media-title")
 _POSITION_INTERVAL = 10.0
 _REDRAW_INTERVAL = 0.5
@@ -268,7 +270,7 @@ class PlayerSession:
             self._send("stop")
         elif key == "a":
             self.autoplay = not self.autoplay
-            self._flash("자동재생 " + ("켜짐" if self.autoplay else "꺼짐"))
+            self._flash("자동재생을 " + ("켰습니다" if self.autoplay else "껐습니다"))
         elif key == "g":
             self._modal = LinePrompt("이동할 시간 (0710 → 7:10 / 012930 → 1:29:30): ")
             if self._tty:
