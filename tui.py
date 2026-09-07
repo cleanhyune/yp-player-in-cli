@@ -91,25 +91,30 @@ def truncate(text: str, width: int) -> str:
 
 
 def format_status(state: dict, width: int) -> str:
+    """제어줄: 재생 상태·시간·볼륨·자동재생·일시 메시지. 다음 영상 힌트는 별도 줄(format_next_line)."""
     icon = "⏸" if state.get("paused") else "▶"
     pos = format_duration(state.get("position") or 0)
     dur = format_duration(state.get("duration") or 0)
-    fixed_parts = [
+    parts = [
         f"{icon} {pos} / {dur}",
         f"vol {int(state.get('volume') or 0)}",
         "자동재생 " + ("켜짐" if state.get("autoplay") else "꺼짐"),
     ]
     if state.get("message"):
-        fixed_parts.append(str(state["message"]))
-    fixed_joined = "  ".join(fixed_parts)
+        parts.append(str(state["message"]))
+    return truncate("  ".join(parts), width)
 
+
+def format_next_line(hint: str, width: int) -> str:
+    return truncate(f"다음: {hint}", width)
+
+
+def format_status_lines(state: dict, width: int) -> list[str]:
+    """상태 영역 전체. 자동재생이 켜져 있고 다음 영상이 정해졌으면 둘째 줄에 힌트가 폭 전체를 쓴다."""
+    lines = [format_status(state, width)]
     if state.get("autoplay") and state.get("next_hint"):
-        remaining = width - display_width(fixed_joined) - len("  다음: ")
-        if remaining >= 8:
-            hint = truncate(str(state["next_hint"]), remaining)
-            fixed_joined += f"  다음: {hint}"
-
-    return truncate(fixed_joined, width)
+        lines.append(format_next_line(str(state["next_hint"]), width))
+    return lines
 
 
 class Pager:
@@ -274,15 +279,48 @@ def terminal_size() -> os.terminal_size:
     return shutil.get_terminal_size((80, 24))
 
 
-def draw_status(text: str, out=sys.stdout) -> None:
-    out.write("\r\x1b[2K" + text)
-    out.flush()
+class StatusArea:
+    """여러 줄 상태 영역. 마지막으로 그린 줄 수를 기억해 다시 그릴 때 같은 자리에 덮어쓴다.
 
+    그린 뒤 커서는 마지막 줄 끝에 남는다. 다시 그릴 땐 커서를 (줄 수 - 1)만큼 올려 첫 줄부터
+    덮어쓰고, 줄 수가 줄었으면 남은 줄을 지운 뒤 커서를 새 마지막 줄로 되돌린다.
+    clear()는 영역을 전부 지우고 커서를 첫 줄 맨 앞에 두어 다음 print가 그 자리에 찍히게 한다.
+    """
 
-def end_status(out=sys.stdout) -> None:
-    """상태줄을 지운다. 줄바꿈을 넣지 않으므로 다음 print가 그 자리에 찍힌다."""
-    out.write("\r\x1b[2K")
-    out.flush()
+    def __init__(self, out=None):
+        self._out = out if out is not None else sys.stdout
+        self.lines_drawn = 0
+
+    def draw(self, lines: list[str]) -> None:
+        seq = ""
+        if self.lines_drawn > 1:
+            seq += f"\x1b[{self.lines_drawn - 1}A"
+        for index, line in enumerate(lines):
+            if index:
+                seq += "\n"
+            seq += "\r\x1b[2K" + line
+        extra = self.lines_drawn - len(lines)
+        if extra > 0:
+            seq += "\n\r\x1b[2K" * extra
+            seq += f"\x1b[{extra}A"
+        self._out.write(seq)
+        self._out.flush()
+        self.lines_drawn = len(lines)
+
+    def clear(self) -> None:
+        if self.lines_drawn == 0:
+            return
+        seq = ""
+        if self.lines_drawn > 1:
+            seq += f"\x1b[{self.lines_drawn - 1}A"
+        seq += "\r\x1b[2K"
+        seq += "\n\r\x1b[2K" * (self.lines_drawn - 1)
+        if self.lines_drawn > 1:
+            seq += f"\x1b[{self.lines_drawn - 1}A"
+        seq += "\r"
+        self._out.write(seq)
+        self._out.flush()
+        self.lines_drawn = 0
 
 
 def enter_alt_screen(out=sys.stdout) -> None:

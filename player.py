@@ -11,9 +11,9 @@ from typing import Callable
 
 from comments import fetch_comments, format_comments
 from mpv_ipc import MpvClient, MpvError
-from tui import (KeyReader, LinePrompt, Pager, draw_pager, draw_status, end_status,
-                 enter_alt_screen, exit_alt_screen, format_status, parse_timecode,
-                 terminal_mode, terminal_size)
+from tui import (KeyReader, LinePrompt, Pager, StatusArea, draw_pager, enter_alt_screen,
+                 exit_alt_screen, format_status_lines, parse_timecode, terminal_mode,
+                 terminal_size)
 
 _IPC_SOCKET = "/tmp/yp_mpv_socket"
 _PLAYER_CLIENTS = ("web_embedded", "android")
@@ -79,6 +79,7 @@ class PlayerSession:
         self._last_position_cb = 0.0
         self._last_draw = 0.0
         self._comments_thread: threading.Thread | None = None
+        self._status = StatusArea(sys.stdout)
         self._load_generation = 0
 
     # ----- lifecycle -----
@@ -270,7 +271,7 @@ class PlayerSession:
         elif key == "g":
             self._modal = LinePrompt("이동할 시간 (0710 → 7:10 / 012930 → 1:29:30): ")
             if self._tty:
-                draw_status(self._modal.render())
+                self._status.draw([self._modal.render()])
         elif key == "t":
             self._request_comments()
         else:
@@ -299,7 +300,7 @@ class PlayerSession:
             state = modal.handle_key(key)
             if state == "pending":
                 if self._tty:
-                    draw_status(modal.render())
+                    self._status.draw([modal.render()])
                 return
             self._modal = None
             if state == "submit":
@@ -360,11 +361,11 @@ class PlayerSession:
             return
         self._last_draw = now
         cols, _ = terminal_size()
-        draw_status(format_status(self._state(), cols))
+        self._status.draw(format_status_lines(self._state(), cols))
 
     def _print_line(self, text: str) -> None:
         if self._tty:
-            end_status()
+            self._status.clear()
             sys.stdout.write(text + "\n")
             sys.stdout.flush()
             self._redraw(force=True)
@@ -376,5 +377,5 @@ class PlayerSession:
         if self._tty:
             if isinstance(self._modal, Pager):
                 exit_alt_screen(sys.stdout)
-            end_status()
+            self._status.clear()
         self._modal = None
