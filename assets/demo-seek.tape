@@ -11,14 +11,18 @@ Set BorderRadius 8
 Set Theme "Dracula"
 Set TypingSpeed 60ms
 
+Hide
+Type `yp() { python3.11 yp.py "$@"; }`
+Enter
 Type `clear`
 Enter
+Show
 Sleep 500ms
 Type `yp "로파이 재즈 힙합"`
 Enter
 Sleep 8s
 Enter
-Sleep 4s
+Sleep 5s
 Type "g"
 Sleep 800ms
 Type "0130"
