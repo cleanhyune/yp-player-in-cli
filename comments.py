@@ -12,30 +12,81 @@ from yt_dlp import YoutubeDL
 
 from ytdlp_common import SilentLogger
 
+PAGE_SIZE = 100
 
-def fetch_comments(url: str, limit: int = 100) -> list[dict]:
+# YouTube가 지원하는 최상위 댓글 정렬. "top"은 요청마다 순서가 흔들리고 "new"는 안정적이다
+# (CommentFeed의 중복 제거가 필요한 이유).
+SORT_LABELS = {"top": "인기순", "new": "최신순"}
+
+
+def next_sort(sort: str) -> str:
+    return "new" if sort == "top" else "top"
+
+
+def fetch_root_comments(url: str, offset: int = 0, limit: int = PAGE_SIZE,
+                        sort: str = "top") -> tuple[list[dict], bool]:
+    """최상위 댓글을 offset부터 limit개 가져온다. 반환값은 (댓글, 뒤에 더 있을 수 있음).
+
+    yt-dlp는 "여기서부터 이어서" 같은 커서를 노출하지 않고 상한값만 받으므로, 다음 페이지는
+    offset+limit개를 다시 걷고 앞부분을 잘라내서 만든다. 답글 상한을 0으로 내려 답글
+    continuation 요청을 아예 없애 이 재조회 비용을 낮게 유지한다.
+    """
+    want = offset + limit
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "logger": SilentLogger(),
         "getcomments": True,
         # max_comments = [total, max_parents, max_replies, max_replies_per_thread]; 빈 값은 무제한.
-        # 총량이 아니라 최상위 댓글 수를 limit로 잡고, 스레드당 답글은 10개로 끊어 조회 시간을 묶어둔다.
-        "extractor_args": {"youtube": {"max_comments": ["", str(limit), "", "10"], "comment_sort": ["top"]}},
+        "extractor_args": {"youtube": {"max_comments": ["", str(want), "0", "0"],
+                                       "comment_sort": [sort]}},
     }
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
-    raw = info.get("comments") or []
-    result = []
-    for c in raw:
-        result.append({
-            "author": c.get("author") or "알 수 없음",
-            "text": c.get("text") or "",
-            "like_count": c.get("like_count") or 0,
-            "parent": c.get("parent") or "root",
-        })
-    return result
+    roots = [c for c in (info.get("comments") or []) if (c.get("parent") or "root") == "root"]
+    # 요청한 만큼 다 받았으면 아직 뒤가 남아 있다고 본다.
+    more = len(roots) >= want
+    page = [{
+        "author": c.get("author") or "알 수 없음",
+        "text": c.get("text") or "",
+        "like_count": c.get("like_count") or 0,
+    } for c in roots[offset:]]
+    return page, more
+
+
+class CommentFeed:
+    """한 영상의 최상위 댓글을 페이지 단위로 넘겨준다.
+
+    yt-dlp에는 커서가 없어서 매 페이지를 offset+page_size개 다시 걷고 앞부분을 잘라내는데,
+    "top" 정렬은 요청 사이에 순서가 흔들려서 그 슬라이스만으로는 같은 댓글이 두 번 나온다
+    (실측: 40개 중 6~38개가 재정렬됨). 그래서 (작성자, 본문) 키로 이미 보여준 것을 걸러낸다.
+    걸러진 만큼 페이지가 page_size보다 짧아지고, 반대로 앞으로 밀려온 댓글은 못 보게 된다 —
+    "new" 정렬은 안정적이라 이 손실이 없다.
+    """
+
+    def __init__(self, url: str, sort: str = "top", page_size: int = PAGE_SIZE):
+        self.url = url
+        self.sort = sort
+        self.shown = 0            # 지금까지 내보낸 댓글 수 = 다음 페이지의 시작 번호 - 1
+        self._page_size = page_size
+        self._offset = 0          # YouTube 목록에서 건너뛸 개수
+        self._seen: set[tuple[str, str]] = set()
+
+    def next_page(self) -> tuple[list[dict], bool]:
+        """다음 페이지를 가져온다. 반환값은 (댓글, 뒤에 더 있을 수 있음)."""
+        raw, more = fetch_root_comments(self.url, offset=self._offset,
+                                        limit=self._page_size, sort=self.sort)
+        page = []
+        for c in raw:
+            key = (c["author"], c["text"])
+            if key in self._seen:
+                continue
+            self._seen.add(key)
+            page.append(c)
+        self._offset += self._page_size
+        self.shown += len(page)
+        return page, more
 
 
 def _wrap(text: str, width: int, indent: str) -> list[str]:
@@ -49,19 +100,24 @@ def _wrap(text: str, width: int, indent: str) -> list[str]:
     return lines
 
 
-def format_comments(comments: list[dict], title: str) -> list[str]:
-    """댓글 목록을 페이저에 그릴 줄 목록으로 만든다. 답글은 한 단계 들여쓴다."""
-    lines = [title, "━" * 44, ""]
-    for i, c in enumerate(comments, 1):
+def format_comments(comments: list[dict], title: str | None = None, start_index: int = 1,
+                    note: str | None = None) -> list[str]:
+    """댓글 목록을 페이저에 그릴 줄 목록으로 만든다.
+
+    title이 없으면 헤더를 붙이지 않는다 (열려 있는 페이저 뒤에 이어붙일 페이지용).
+    note는 제목 구분선 아래에 한 줄로 들어간다 (현재 정렬 표시용).
+    """
+    lines = []
+    if title is not None:
+        lines = [title, "━" * 44]
+        if note is not None:
+            lines.append(note)
+        lines.append("")
+    for i, c in enumerate(comments, start_index):
         like_count = c.get("like_count") or 0
         like = f" | 좋아요 {like_count:,}" if like_count else ""
         author = c.get("author") or "알 수 없음"
-        text = c.get("text") or ""
-        if c.get("parent", "root") != "root":
-            lines.append(f"     └─ {author}{like}")
-            lines.extend(_wrap(text, 72, "        "))
-        else:
-            lines.append(f" {i:2}. {author}{like}")
-            lines.extend(_wrap(text, 76, "     "))
+        lines.append(f" {i:2}. {author}{like}")
+        lines.extend(_wrap(c.get("text") or "", 76, "     "))
         lines.append("")
     return lines

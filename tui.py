@@ -118,12 +118,26 @@ def format_status_lines(state: dict, width: int) -> list[str]:
 
 
 class Pager:
-    def __init__(self, lines: list[str]):
+    DEFAULT_HINT = "j/k 스크롤 · space 페이지 · q 닫기"
+
+    def __init__(self, lines: list[str], more: bool = False, hint: str | None = None):
         self.lines = lines
         self.top = 0
+        self.hint = hint or self.DEFAULT_HINT
+        # more: 뒤에 더 불러올 페이지가 있을 수 있음. status: 푸터에 띄울 한 줄
+        # (요청 중/실패). status가 None이 아니면 소유자는 새 요청을 보내지 않는다.
+        self.more = more
+        self.status: str | None = None
 
     def visible(self, height: int) -> list[str]:
         return self.lines[self.top:self.top + height]
+
+    def append(self, lines: list[str]) -> None:
+        """스크롤 위치를 유지한 채 뒤에 줄을 이어붙인다."""
+        self.lines.extend(lines)
+
+    def at_bottom(self, height: int) -> bool:
+        return self.top >= max(0, len(self.lines) - height)
 
     def handle_key(self, key: str, height: int) -> bool:
         """키를 처리하고, 페이저를 닫아야 하면 True."""
@@ -338,6 +352,7 @@ def draw_pager(pager: Pager, out=sys.stdout) -> None:
     height = max(1, rows - 1)
     body = [truncate(line, cols) for line in pager.visible(height)]
     last = min(pager.top + height, len(pager.lines))
-    footer = f"-- {pager.top + 1}-{last}/{len(pager.lines)}  j/k 스크롤 · space 페이지 · q 닫기 --"
+    hint = pager.status or pager.hint
+    footer = f"-- {pager.top + 1}-{last}/{len(pager.lines)}  {hint} --"
     out.write("\x1b[2J\x1b[H" + "\r\n".join(body) + "\r\n" + truncate(footer, cols))
     out.flush()
