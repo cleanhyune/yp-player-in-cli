@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 # Must be set before yt_dlp is imported: a user's globally-installed yt-dlp
 # plugin (e.g. a broken PO-token provider under ~/.config/yt-dlp/plugins/)
@@ -51,6 +52,7 @@ def fetch_root_comments(url: str, offset: int = 0, limit: int = PAGE_SIZE,
         "author": c.get("author") or "알 수 없음",
         "text": c.get("text") or "",
         "like_count": c.get("like_count") or 0,
+        "age": format_age(c.get("_time_text")),
     } for c in roots[offset:]]
     return page, more
 
@@ -89,6 +91,29 @@ class CommentFeed:
         return page, more
 
 
+_AGE_UNITS = {"minute": "분", "hour": "시간", "day": "일",
+              "week": "주", "month": "개월", "year": "년"}
+_AGE_RE = re.compile(r"(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago")
+
+
+def format_age(time_text: str | None) -> str | None:
+    """YouTube의 상대 표기("5 hours ago")를 한국어로 옮긴다. 못 읽으면 None.
+
+    같은 정보를 담은 `timestamp`를 쓰지 않는 이유: yt-dlp는 상대 표기를 역산한 뒤 자정/정시로
+    양자화하므로 (실측: "5 hours ago" → 22:00:00, 실제 차이 4.79시간) 다시 나누면 단위가
+    하나씩 밀리고, YouTube의 "일" 버킷이 13일까지 뻗는 것 같은 규칙도 맞춰줘야 한다. 원본
+    문자열을 옮기면 그 전부가 필요 없다. `_time_text`는 yt-dlp 내부 필드라 사라질 수 있는데,
+    그때는 시기 표시만 조용히 빠진다 — 틀린 시기가 나오는 것보다 낫다.
+    """
+    m = _AGE_RE.search(time_text or "")
+    if m is None:
+        return None
+    count, unit = m.group(1), m.group(2)
+    if unit == "second":
+        return "방금 전"
+    return f"{count}{_AGE_UNITS[unit]} 전"
+
+
 def _wrap(text: str, width: int, indent: str) -> list[str]:
     lines = []
     for paragraph in text.splitlines() or [""]:
@@ -115,9 +140,10 @@ def format_comments(comments: list[dict], title: str | None = None, start_index:
         lines.append("")
     for i, c in enumerate(comments, start_index):
         like_count = c.get("like_count") or 0
-        like = f" | 좋아요 {like_count:,}" if like_count else ""
+        meta = "".join(f" | {part}" for part in (
+            f"좋아요 {like_count:,}" if like_count else None, c.get("age")) if part)
         author = c.get("author") or "알 수 없음"
-        lines.append(f" {i:2}. {author}{like}")
+        lines.append(f" {i:2}. {author}{meta}")
         lines.extend(_wrap(c.get("text") or "", 76, "     "))
         lines.append("")
     return lines
