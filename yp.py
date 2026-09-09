@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import threading
 import warnings
+from datetime import date
 warnings.filterwarnings("ignore")
 import questionary
 
@@ -14,6 +15,10 @@ from selector import (NEW_SEARCH, NEXT_PAGE, PREV_PAGE, format_duration,
                       select_recent, select_video)
 
 MAX_PAGES = 3
+
+
+def _today() -> str:
+    return date.today().isoformat()
 
 
 class _Prefetch:
@@ -118,8 +123,16 @@ def _run(query: str):
 def _play_session(video: dict) -> None:
     """영상 하나로 시작해 자동재생/n 키로 이어지는 체인을 mpv 프로세스 하나에서 돌린다."""
     state = history.load_state()
+    # 하루에 한 번은 기억한 전략을 버리고 player의 기본 순서로 다시 탐색한다. YouTube가
+    # IP 차단을 풀었을 때 느리고 쿠키까지 쓰는 경로에 영구히 머무르지 않기 위한 것이다.
+    # 차단이 여전하면 익명 시도 두 칸이 지나가는 값만 물리고(2026-09 측정: android 1.3s +
+    # web_embedded 2.1s) 곧바로 쿠키 경로로 떨어지며, 차단이 없으면 첫 시도가 성공하므로
+    # 재탐색 비용은 0이다. 곡을 고른 직후라 사용자가 이미 스트림을 기다리는 시점이고,
+    # 자동재생 체인 중간에는 끼지 않는다.
+    today = _today()
+    strategy = state["strategy"] if state["probed"] == today else None
     session = PlayerSession(volume=state["volume"], autoplay=state["autoplay"],
-                            tty=sys.stdin.isatty())
+                            tty=sys.stdin.isatty(), strategy=strategy)
     played_ids: set = set()
     try:
         # start()도 정리 범위 안에 둔다. 기동 중 Ctrl-C가 들어와도 finally가
@@ -172,7 +185,7 @@ def _play_session(video: dict) -> None:
         print("\n재생을 중단합니다.")
     finally:
         try:
-            history.save_state(session.volume, session.autoplay)
+            history.save_state(session.volume, session.autoplay, session.strategy, today)
         except Exception:
             pass
         session.quit()

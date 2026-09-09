@@ -3,3 +3,8 @@ tests/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# 빌드 산출물
+*.egg-info/
+dist/
+build/

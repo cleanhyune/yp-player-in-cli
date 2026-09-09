@@ -16,9 +16,24 @@ from tui import (KeyReader, LinePrompt, Pager, StatusArea, draw_pager, enter_alt
                  terminal_size)
 
 _IPC_SOCKET = "/tmp/yp_mpv_socket"
-# android가 현재 거의 모든 영상을 첫 시도에 열고(2~3초), web_embedded는 실패 후 폴백에 3~4초를
-# 더 쓰는 경우가 많아 android를 먼저 시도한다 (2026-09 측정).
-_PLAYER_CLIENTS = ("android", "web_embedded")
+_COOKIE_BROWSER = "chrome"
+# (player_client, 쿠키를 붙일지) 순서대로 시도한다.
+#
+# android가 익명으로 거의 모든 영상을 첫 시도에 열고(2~3초), web_embedded는 실패 후 폴백에
+# 3~4초를 더 쓰는 경우가 많아 익명 두 칸을 먼저 둔다 (2026-09 측정).
+#
+# 마지막 칸은 브라우저 쿠키를 붙인 시도다. YouTube가 IP 단위로 player 엔드포인트에 봇 인증을
+# 요구하기 시작하면 익명 요청은 yt-dlp 버전·player_client와 무관하게 전부
+# "Sign in to confirm you're not a bot"으로 죽고, 쿠키를 붙이는 것만이 통한다 (2026-09 측정:
+# 2025.10.14 / 2026.06.09 / 2026.07.04 / 2026.08.19 × 8개 클라이언트 전멸). 이때 쿠키와 함께
+# 쓸 수 있는 클라이언트가 갈리는데 android/ios는 "No video formats found!", tv는 "The page
+# needs to be reloaded"로 깨지고 web 계열만 살아남는다. 그중 가장 빨랐던 web_safari를 쓴다
+# (7.3s vs web_embedded 8.1s / mweb 8.6s / web 9.7s).
+_ATTEMPTS = (
+    ("android", False),
+    ("web_embedded", False),
+    ("web_safari", True),
+)
 _OBSERVED = ("time-pos", "pause", "volume", "duration", "media-title")
 _POSITION_INTERVAL = 10.0
 _REDRAW_INTERVAL = 0.5
@@ -28,6 +43,24 @@ _COMMENT_HINT = "j/k 스크롤 · space 페이지 · s 정렬 · q 닫기"
 
 class PlayerError(Exception):
     pass
+
+
+def _raw_options(client: str, cookies: bool) -> str:
+    """mpv의 ytdl-raw-options 문자열. 콤마로 나뉜 key=value 목록이다."""
+    opts = f"extractor-args=youtube:player_client={client}"
+    if cookies:
+        opts += f",cookies-from-browser={_COOKIE_BROWSER}"
+    return opts
+
+
+def _attempt_order(preferred: str | None) -> list[tuple[str, bool]]:
+    """지난번에 통한 시도를 맨 앞으로 돌리고, 나머지는 _ATTEMPTS 순서를 지킨다.
+
+    차단이 걸린 상태에서 매 영상마다 익명 시도 두 칸을 버리지 않기 위한 것이다 (mpv를
+    거친 실측 약 5.7초 — yt-dlp 자체 실패는 3.4초고 나머지는 mpv가 시도마다 ytdl_hook을
+    다시 띄우는 비용). preferred가 지금은 없는 이름이면 그냥 기본 순서로 돈다."""
+    front = [a for a in _ATTEMPTS if a[0] == preferred]
+    return front + [a for a in _ATTEMPTS if a[0] != preferred]
 
 
 def check_mpv() -> bool:
@@ -58,9 +91,13 @@ class PlayerSession:
     소비한다. 상태가 한곳에 있어야 'n 뒤에 오는 end-file stop은 next다' 같은 해석이 안전하다.
     """
 
-    def __init__(self, volume: int = 100, autoplay: bool = True, tty: bool = True):
+    def __init__(self, volume: int = 100, autoplay: bool = True, tty: bool = True,
+                 strategy: str | None = None):
         self.volume = volume
         self.autoplay = autoplay
+        # 지난 세션에서 실제로 스트림을 연 시도의 player_client. load()가 갱신하고
+        # yp가 state.json에 넣는다.
+        self.strategy = strategy
         self.position = 0.0
         self.duration = 0.0
         self.paused = False
@@ -167,17 +204,22 @@ class PlayerSession:
         self._load_generation += 1
         reason = "error"
         try:
-            for index, client in enumerate(_PLAYER_CLIENTS):
-                is_final = index == len(_PLAYER_CLIENTS) - 1
+            attempts = _attempt_order(self.strategy)
+            for index, (client, cookies) in enumerate(attempts):
+                is_final = index == len(attempts) - 1
                 try:
                     self._client.command("set", "ytdl-raw-options",
-                                         f"extractor-args=youtube:player_client={client}")
+                                         _raw_options(client, cookies))
                     self._client.command("set", "start", str(int(start)) if start else "none")
                     self._client.command("loadfile", url)
                 except MpvError:
                     reason = "error"
                     break
                 reason = self._wait_end(show_errors=is_final)
+                # duration이 들어왔다는 것만이 스트림이 실제로 열렸다는 확실한 증거다.
+                # 해석 중에 사용자가 q를 눌러 끝난 경우를 성공으로 기억하면 안 된다.
+                if reason == "eof" or self.duration > 0:
+                    self.strategy = client
                 if reason != "error" or self.closed:
                     break
         finally:

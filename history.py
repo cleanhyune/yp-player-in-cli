@@ -127,12 +127,24 @@ def load_state() -> dict:
     data = _read_json(_state_path())
     volume = data.get("volume", 100)
     autoplay = data.get("autoplay", True)
+    # 지난번에 스트림을 연 player_client. 여기서 이름을 검증하지는 않는다 — player가
+    # 모르는 이름을 받으면 기본 순서로 돌기 때문에, 옛 이름이 남아 있어도 안전하다.
+    strategy = data.get("strategy")
+    # strategy를 마지막으로 다시 탐색한 날짜(ISO). 날짜 형식도 검증하지 않는다 —
+    # 오늘과 다르면 재탐색이라는 규칙이므로 이상한 값은 그냥 재탐색을 한 번 더 유발한다.
+    probed = data.get("probed")
     if not isinstance(volume, int) or isinstance(volume, bool):
         volume = 100
     if not isinstance(autoplay, bool):
         autoplay = True
-    return {"volume": volume, "autoplay": autoplay}
+    if not isinstance(strategy, str):
+        strategy = None
+    if not isinstance(probed, str):
+        probed = None
+    return {"volume": volume, "autoplay": autoplay, "strategy": strategy, "probed": probed}
 
 
-def save_state(volume: int, autoplay: bool) -> None:
-    _write_json(_state_path(), {"volume": int(volume), "autoplay": bool(autoplay)})
+def save_state(volume: int, autoplay: bool, strategy: str | None = None,
+               probed: str | None = None) -> None:
+    _write_json(_state_path(), {"volume": int(volume), "autoplay": bool(autoplay),
+                                "strategy": strategy, "probed": probed})
