@@ -136,6 +136,113 @@ def progress_bar(position: float, duration: float, width: int) -> str:
     return _BAR_FULL * filled + dim(_BAR_EMPTY * (width - filled))
 
 
+_CARD_MAX_WIDTH = 72       # 박스 전체 폭 상한 (테두리 포함)
+_CARD_MIN_COLS = 44        # 이보다 좁으면 박스를 포기하고 압축형
+_CARD_MIN_ROWS = 15        # 이보다 낮으면 박스를 포기하고 압축형
+_KEY_HINT = "q 종료   n 다음   a 자동재생   g 이동   t 댓글"
+
+
+def _times(state: dict) -> tuple[str, str, float, float]:
+    """(아이콘+현재시각, 전체시각, position, duration).
+
+    duration은 mpv가 보고한 값을 우선하고, 아직 없으면 yp가 검색 결과에서 알고 있는
+    track_duration으로 대신한다. 둘 다 없으면 0이고 화면엔 --:-- 이 뜬다.
+    """
+    pos = float(state.get("position") or 0)
+    dur = float(state.get("duration") or 0) or float(state.get("track_duration") or 0)
+    # "▶"(East Asian Width: A)와 일시정지 중 서로 바뀌어 그려지는 짝이다. "⏸"(N등급)를
+    # 쓰면 등급이 갈라져, ambiguous를 2칸으로 렌더하는 터미널(한국어 로케일에서 흔함)에서
+    # 토글할 때마다 이 줄의 폭이 흔들려 박스 오른쪽 테두리가 밀린다. "‖"는 A등급이라
+    # "▶"와 짝이 맞는다 — 되돌리지 말 것.
+    icon = "‖" if state.get("paused") else "▶"
+    left = f"{icon} {format_duration(int(pos))}"
+    right = format_duration(int(dur)) if dur > 0 else "--:--"
+    return left, right, pos, dur
+
+
+def _meta_text(state: dict) -> str:
+    on = "ON" if state.get("autoplay") else "OFF"
+    return f"vol {int(state.get('volume') or 0)}      자동재생 {on}"
+
+
+def _next_text(state: dict) -> str:
+    hint = state.get("next_hint")
+    return f"↳ {hint}" if hint else ""
+
+
+def _tail_line(state: dict, cols: int) -> str:
+    """마지막 행: 시간 이동 프롬프트가 열려 있으면 그것, 아니면 키 힌트."""
+    prompt = state.get("prompt")
+    if prompt:
+        # 커서를 숨긴 상태이므로 입력 끝을 밑줄로 표시한다.
+        return _fit("  " + str(prompt) + "_", cols)
+    return dim(_fit("  " + _KEY_HINT, cols))
+
+
+def _card_rows(state: dict, w: int) -> list[str]:
+    """박스 안쪽 11줄. 줄 수는 상태와 무관하게 고정이라 문구가 생겨도 밀리지 않는다."""
+    left, right, pos, dur = _times(state)
+    gap = max(1, w - display_width(left) - display_width(right))
+    return [
+        _fit("", w),
+        bold(_fit(str(state.get("title") or "(제목 없음)"), w)),
+        dim(_fit(str(state.get("channel") or ""), w)),
+        _fit("", w),
+        progress_bar(pos, dur, w),
+        dim(_fit(left + " " * gap + right, w)),
+        dim(_fit(str(state.get("notice") or ""), w)),
+        _fit("", w),
+        _fit(_meta_text(state), w),
+        dim(_fit(_next_text(state), w)),
+        _fit("", w),
+    ]
+
+
+def _boxed_card(state: dict, cols: int, height: int) -> list[str]:
+    outer = min(cols - 4, _CARD_MAX_WIDTH)
+    inner = outer - 2
+    margin = " " * ((cols - outer) // 2)
+    rows = _card_rows(state, inner - 4)
+    box = [margin + "┌" + "─" * inner + "┐"]
+    box += [margin + "│  " + row + "  │" for row in rows]
+    box.append(margin + "└" + "─" * inner + "┘")
+    return [""] * max(0, (height - len(box)) // 2) + box
+
+
+def _compact_card(state: dict, cols: int) -> list[str]:
+    """박스를 그릴 자리가 없을 때의 4줄. 마지막 행 키 힌트는 호출자가 붙인다."""
+    w = max(8, cols - 2)
+    left, right, pos, dur = _times(state)
+    head = str(state.get("title") or "(제목 없음)")
+    channel = state.get("channel")
+    if channel:
+        head += f" · {channel}"
+    notice = state.get("notice") or _next_text(state)
+    return [
+        bold(_fit(" ♪ " + head, cols)),
+        " " + progress_bar(pos, dur, w),
+        dim(_fit(f" {left} / {right}   {_meta_text(state)}", cols)),
+        dim(_fit(" " + str(notice), cols)),
+    ]
+
+
+def render_playing(state: dict, cols: int, rows: int) -> list[str]:
+    """재생 화면 한 프레임. 반환 줄 수는 항상 rows와 같다.
+
+    각 줄은 이미 cols 안에 맞춰져 있으므로 호출자가 다시 자르면 안 된다 (ANSI가 깨진다).
+    """
+    if rows <= 0:
+        return []
+    body_height = rows - 1
+    if rows < _CARD_MIN_ROWS or cols < _CARD_MIN_COLS:
+        body = _compact_card(state, cols)
+    else:
+        body = _boxed_card(state, cols, body_height)
+    body = body[:body_height]
+    body += [""] * (body_height - len(body))
+    return body + [_tail_line(state, cols)]
+
+
 def format_status(state: dict, width: int) -> str:
     """제어줄: 재생 상태·시간·볼륨·자동재생·일시 메시지. 다음 영상 힌트는 별도 줄(format_next_line)."""
     icon = "⏸" if state.get("paused") else "▶"
