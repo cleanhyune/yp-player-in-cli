@@ -134,61 +134,73 @@ def _play_session(video: dict) -> None:
     session = PlayerSession(volume=state["volume"], autoplay=state["autoplay"],
                             tty=sys.stdin.isatty(), strategy=strategy)
     played_ids: set = set()
+    # 재생 중에는 대체 화면 안이라 print가 나갈 때 사라진다. 종료 사유는 여기 모았다가
+    # session.quit()으로 화면을 나온 뒤에 찍는다.
+    notes: list[str] = []
     try:
         # start()도 정리 범위 안에 둔다. 기동 중 Ctrl-C가 들어와도 finally가
         # session.quit()을 돌려 고아 mpv와 복원되지 않은 cbreak 모드를 막는다.
         try:
             session.start()
         except PlayerError as e:
-            print(f"mpv를 시작할 수 없습니다: {e}")
-            return
-        while True:
-            video_id = extract_video_id(video["url"])
-            played_ids.add(video_id)
-            history.record_start(video)
-            session.on_position(lambda seconds, _id=video_id: history.record_position(_id, seconds))
-            session.set_next_hint(None)
-            prefetch = _Prefetch(video["url"], played_ids, video.get("channel"), session)
+            notes.append(f"mpv를 시작할 수 없습니다: {e}")
+        else:
+            while True:
+                video_id = extract_video_id(video["url"])
+                played_ids.add(video_id)
+                history.record_start(video)
+                session.on_position(
+                    lambda seconds, _id=video_id: history.record_position(_id, seconds))
+                session.set_next_hint(None)
+                session.set_track(video["title"], video.get("channel"), video.get("duration"))
+                prefetch = _Prefetch(video["url"], played_ids, video.get("channel"), session)
 
-            start = history.resume_position(video_id, video.get("duration") or 0)
-            if start:
-                print(f"⏩ {format_duration(start)}부터 이어서 재생합니다")
-            print("스트림 연결 중... (길이에 따라 수 초 걸릴 수 있습니다)")
-            reason = session.load(video["url"], start=start)
+                start = history.resume_position(video_id, video.get("duration") or 0)
+                notice = "스트림 연결 중..."
+                if start:
+                    notice = f"⏩ {format_duration(start)}부터 이어서 · {notice}"
+                session.set_notice(notice)
+                reason = session.load(video["url"], start=start)
 
-            if session.duration > 0:
-                # 자동재생 항목은 duration 0으로 기록됐다. mpv가 관측한 실제 길이를
-                # 위치 정리보다 먼저 채워야 다음 실행의 이어보기 가드가 이를 본다.
-                history.record_duration(video_id, session.duration)
-            if reason == "eof":
-                history.clear_position(video_id)
-            elif session.position > 0:
-                history.record_position(video_id, session.position)
+                if session.duration > 0:
+                    # 자동재생 항목은 duration 0으로 기록됐다. mpv가 관측한 실제 길이를
+                    # 위치 정리보다 먼저 채워야 다음 실행의 이어보기 가드가 이를 본다.
+                    history.record_duration(video_id, session.duration)
+                if reason == "eof":
+                    history.clear_position(video_id)
+                elif session.position > 0:
+                    history.record_position(video_id, session.position)
 
-            if reason == "error":
-                print("재생에 실패했습니다.")
-                break
-            if reason == "quit":
-                break
-            if reason == "eof" and not session.autoplay:
-                break
+                if reason == "error":
+                    notes.append("재생에 실패했습니다.")
+                    break
+                if reason == "quit":
+                    break
+                if reason == "eof" and not session.autoplay:
+                    break
 
-            if not prefetch.done:
-                print("다음 영상을 찾는 중...")
-            next_video = prefetch.result()
-            if next_video is None:
-                print("다음 영상을 찾지 못했습니다.")
-                break
-            video = {**next_video, "duration": 0}
-            print(f"🔁 자동재생: {video['title']} · {video['channel']}")
+                if not prefetch.done:
+                    session.set_notice("다음 영상을 찾는 중...")
+                next_video = prefetch.result()
+                if next_video is None:
+                    notes.append("다음 영상을 찾지 못했습니다.")
+                    break
+                # 다음 곡 제목은 카드로 바로 올라가므로 따로 알릴 필요가 없다.
+                video = {**next_video, "duration": 0}
     except KeyboardInterrupt:
-        print("\n재생을 중단합니다.")
+        notes.append("재생을 중단합니다.")
     finally:
         try:
             history.save_state(session.volume, session.autoplay, session.strategy, today)
         except Exception:
             pass
         session.quit()
+
+    # 여기부터는 원래 터미널이다.
+    for line in session.errors:
+        print(line)
+    for line in notes:
+        print(line)
 
 
 if __name__ == "__main__":
