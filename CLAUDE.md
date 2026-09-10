@@ -10,7 +10,7 @@ searcher.py   # YouTube search via yt-dlp YoutubeDL API
 selector.py   # Arrow-key selection UI via questionary (search results + recent history)
 player.py     # PlayerSession: one mpv process per playback session, driven over JSON IPC
 mpv_ipc.py    # mpv JSON IPC client (request/response matching + event queue). No yp knowledge
-tui.py        # Terminal ownership: cbreak key reader, status line, comments pager, timecode prompt
+tui.py        # Terminal ownership: cbreak key reader, alt-screen card/comments renderers, timecode prompt
 history.py    # ~/.config/yp/history.json (recent + resume position) and state.json (volume, autoplay)
 related.py    # Next-video lookup by parsing the watch page's related-video sidebar; same-channel first
 comments.py   # CommentFeed: paged root-comment fetching with cross-page dedupe + pager formatting ('t')
@@ -21,7 +21,25 @@ comments.py   # CommentFeed: paged root-comment fetching with cross-page dedupe 
 - **yt-dlp Python API** (not subprocess) — `YoutubeDL` class with `extract_flat: True` for fast search without fetching full metadata
 - **`_SilentLogger`** in `searcher.py` — suppresses yt-dlp's Python version deprecation warnings
 - **Autoplay via sidebar scraping, not yt-dlp** — `related.py` fetches the watch page HTML directly and parses the `ytInitialData` JSON blob for the real "related videos" sidebar (`lockupViewModel` entries under `contents.twoColumnWatchNextResults.secondaryResults...`). An earlier version used yt-dlp's `RD<video_id>` mix playlist, but that mix doesn't exist for many videos (e.g. broadcast/drama clips) — see [[autoplay_related_videos]] memory. yt-dlp deliberately doesn't expose this sidebar, so this parsing is unofficial and self-maintained: if YouTube changes the JSON shape, only fixing `related.py` (not `pip install -U yt-dlp`) will help. `fetch_next()` swallows every exception internally so a broken parse can never propagate into the autoplay loop
-- **One mpv per playback session, Python owns the terminal** — `PlayerSession.start()` launches `mpv --no-video --no-terminal --idle=yes --input-ipc-server=/tmp/yp_mpv_socket` once; each video is a `loadfile` over IPC, so autoplay/`n` transitions have no process restart and volume/pause state survives. Because mpv has no terminal, `tui.KeyReader` reads stdin in cbreak mode (not raw — Ctrl+C must still raise `KeyboardInterrupt`) and forwards unknown keys to mpv via the `keypress` IPC command, so mpv's default bindings (space, arrows, 9/0, m) keep working. Intercepted keys: `q` quit, `n` next, `a` autoplay toggle, `g` timecode prompt, `t` comments pager (and inside the pager, `s` toggles comment sort). The status line and pager are drawn by Python; mpv's own OSD is never used
+- **One mpv per playback session, Python owns the terminal** — `PlayerSession.start()` launches `mpv --no-video --no-terminal --idle=yes --input-ipc-server=/tmp/yp_mpv_socket` once; each video is a `loadfile` over IPC, so autoplay/`n` transitions have no process restart and volume/pause state survives. Because mpv has no terminal, `tui.KeyReader` reads stdin in cbreak mode (not raw — Ctrl+C must still raise `KeyboardInterrupt`) and forwards unknown keys to mpv via the `keypress` IPC command, so mpv's default bindings (space, arrows, 9/0, m) keep working. Intercepted keys: `q` quit, `n` next, `a` autoplay toggle, `g` timecode prompt, `t` comments pager (and inside the pager, `s` toggles comment sort).
+  Python이 재생 중 터미널 전체를 소유한다: `start()`에서 대체 화면(alt screen)에 들어가
+  `quit()`에서 나오므로 자동재생 체인 전체가 한 화면 세션이고 곡 전환에 깜빡임이 없다.
+  `tui.render_playing()` / `render_comments()`가 화면 한 프레임을 `list[str]`로 만드는
+  **순수 함수**이고 `tui.Screen`이 `\x1b[H`부터 통째로 덮어쓴다 — 직전 프레임과 같으면
+  쓰지 않고, 크기가 바뀌면 앞에 `\x1b[2J`를 붙여 리사이즈를 공짜로 처리한다. 화면을
+  통째로 소유하므로 예전 `StatusArea`의 커서 산술(N줄 위로, 잔여 줄 지우기)이 사라졌다.
+  댓글은 별도 화면이 아니라 카드 아래 패널이라 읽는 동안에도 진행바가 흐른다 —
+  `_redraw()`에 있던 "모달이 열려 있으면 그리지 않는다" 가드를 없앤 것이 그 핵심이다.
+  본문 높이는 `tui.comments_height(rows)` 하나로만 계산한다 (렌더러와 키 처리가 따로
+  계산하면 `Pager.at_bottom()`이 화면과 어긋난다). mpv의 OSD는 여전히 쓰지 않는다.
+  - **대체 화면 안에서는 `print()`가 무의미하다** — 나갈 때 통째로 사라진다. 그래서
+    `yp.py`가 재생 중 찍던 진행 안내는 카드의 "안내 슬롯"으로 갔고(`set_notice()`),
+    mpv 오류는 `session.errors`에 버퍼링해 `quit()` 뒤에 찍는다. `set_notice()`는
+    `set_next_hint()`와 달리 이벤트 큐를 거치지 않고 바로 그린다 — 곡과 곡 사이에는
+    `_wait_end`의 루프가 돌지 않아 큐에 넣으면 아무도 꺼내지 않기 때문이다 (메인 스레드 전용).
+  - **스타일은 bold/dim만** — 색상은 사용자 터미널 테마와 충돌하므로 쓰지 않는다.
+    `NO_COLOR`가 있으면 둘 다 끈다. 규칙 하나: **평문으로 자르고 패딩한 뒤 스타일을 입힌다.**
+    `display_width()`는 ANSI를 셀 줄 모르므로 순서가 뒤집히면 CJK 제목에서 폭이 조용히 깨진다.
 - **Single event queue** — `MpvClient.events` receives mpv events, key events from `KeyReader`, `comments-ready/failed` plus `comments-more/-failed` and `comments-reload/-failed` from the comments thread, and `redraw` from the prefetch thread. `PlayerSession.load()` consumes only this queue. This is what makes "`end-file reason=stop` right after `n` means `next`, otherwise `quit`" a safe interpretation
 - **Per-file options via `set` before `loadfile`** — the attempt chain and resume position are applied with `set ytdl-raw-options ...` / `set start <sec>|none` immediately before each `loadfile`, not as `loadfile` positional options (whose positional layout changed in mpv 0.38)
 - **The attempt chain ends in a cookie attempt; the winner is remembered but re-probed daily** — `_ATTEMPTS` is `(android, no cookies)` → `(web_embedded, no cookies)` → `(web_safari, cookies-from-browser=chrome)`, and `load()` retries the next entry whenever `end-file reason=error` comes back. The last entry exists because YouTube now demands bot attestation on the player endpoint per-IP: when that kicks in, **every** anonymous request dies with `Sign in to confirm you're not a bot` regardless of yt-dlp version or client (2026-09: verified across 2025.10.14 / 2026.06.09 / 2026.07.04 / 2026.08.19 × 8 clients — all identical), and only cookies get through. Cookies narrow the usable clients, though: `android`/`ios` then fail with `No video formats found!` and `tv` with `The page needs to be reloaded`, so only the web family works — `web_safari` was fastest (7.3s vs web_embedded 8.1s / mweb 8.6s / web 9.7s). Note there is deliberately **no error-string matching** for the bot message: the existing retry-on-error loop already covers it and won't rot when yt-dlp rewords the error
@@ -57,11 +75,19 @@ search(query) -> [{"title", "channel", "url", "duration"}, ...]  # 30개 한번�
 select_video(videos, page, max_pages) -> url | NEXT_PAGE | PREV_PAGE | None
 select_recent(items) -> url | NEW_SEARCH | None
 
-session = PlayerSession(volume, autoplay, tty, strategy); session.start()
+session = PlayerSession(volume, autoplay, tty, strategy); session.start()   # 대체 화면 진입
+session.set_track(title, channel, duration)   # 카드에 미리 올릴 메타데이터 (mpv의 media-title은 늦게 온다)
+session.set_notice(text | None)               # 안내 슬롯. 첫 time-pos에 자동 소멸. 메인 스레드 전용
 session.load(url, start) -> "eof" | "quit" | "next" | "error"   # blocks until the file ends
 session.autoplay / session.volume / session.position           # read after load()
 session.strategy                                               # 실제로 스트림을 연 player_client
-session.quit()
+session.errors                                # 버퍼된 mpv 오류. quit() 뒤에 출력할 것
+session.quit()                                # 대체 화면 이탈
+
+render_playing(state, cols, rows) -> list[str]                 # 길이는 항상 rows
+render_comments(state, pager, cols, rows) -> list[str]         # 길이는 항상 rows
+comments_height(rows) -> int                                   # 페이저 본문 높이. 유일한 출처
+progress_bar(position, duration, width) -> str                 # ANSI 제거 시 폭이 정확히 width
 
 # yp._play_session: reason이 "eof"(autoplay on) 또는 "next"인 동안 prefetch 결과로 load()를 반복
 fetch_next(url, played_ids, current_channel) -> {"title", "channel", "url"} | None   # 같은 채널 우선

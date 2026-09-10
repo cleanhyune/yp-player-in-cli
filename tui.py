@@ -243,33 +243,6 @@ def render_playing(state: dict, cols: int, rows: int) -> list[str]:
     return body + [_tail_line(state, cols)]
 
 
-def format_status(state: dict, width: int) -> str:
-    """제어줄: 재생 상태·시간·볼륨·자동재생·일시 메시지. 다음 영상 힌트는 별도 줄(format_next_line)."""
-    icon = "⏸" if state.get("paused") else "▶"
-    pos = format_duration(state.get("position") or 0)
-    dur = format_duration(state.get("duration") or 0)
-    parts = [
-        f"{icon} {pos} / {dur}",
-        f"vol {int(state.get('volume') or 0)}",
-        "자동재생 " + ("켜짐" if state.get("autoplay") else "꺼짐"),
-    ]
-    if state.get("message"):
-        parts.append(str(state["message"]))
-    return truncate("  ".join(parts), width)
-
-
-def format_next_line(hint: str, width: int) -> str:
-    return truncate(f"다음: {hint}", width)
-
-
-def format_status_lines(state: dict, width: int) -> list[str]:
-    """상태 영역 전체. 자동재생이 켜져 있고 다음 영상이 정해졌으면 둘째 줄에 힌트가 폭 전체를 쓴다."""
-    lines = [format_status(state, width)]
-    if state.get("autoplay") and state.get("next_hint"):
-        lines.append(format_next_line(str(state["next_hint"]), width))
-    return lines
-
-
 def comments_height(rows: int) -> int:
     """댓글 본문 높이. 헤더 2 + 구분선 1 + 푸터 1을 뺀다.
 
@@ -488,56 +461,12 @@ def terminal_size() -> os.terminal_size:
     return shutil.get_terminal_size((80, 24))
 
 
-class StatusArea:
-    """여러 줄 상태 영역. 마지막으로 그린 줄 수를 기억해 다시 그릴 때 같은 자리에 덮어쓴다.
-
-    그린 뒤 커서는 마지막 줄 끝에 남는다. 다시 그릴 땐 커서를 (줄 수 - 1)만큼 올려 첫 줄부터
-    덮어쓰고, 줄 수가 줄었으면 남은 줄을 지운 뒤 커서를 새 마지막 줄로 되돌린다.
-    clear()는 영역을 전부 지우고 커서를 첫 줄 맨 앞에 두어 다음 print가 그 자리에 찍히게 한다.
-    """
-
-    def __init__(self, out=None):
-        self._out = out if out is not None else sys.stdout
-        self.lines_drawn = 0
-
-    def draw(self, lines: list[str]) -> None:
-        seq = ""
-        if self.lines_drawn > 1:
-            seq += f"\x1b[{self.lines_drawn - 1}A"
-        for index, line in enumerate(lines):
-            if index:
-                seq += "\n"
-            seq += "\r\x1b[2K" + line
-        extra = self.lines_drawn - len(lines)
-        if extra > 0:
-            seq += "\n\r\x1b[2K" * extra
-            seq += f"\x1b[{extra}A"
-        self._out.write(seq)
-        self._out.flush()
-        self.lines_drawn = len(lines)
-
-    def clear(self) -> None:
-        if self.lines_drawn == 0:
-            return
-        seq = ""
-        if self.lines_drawn > 1:
-            seq += f"\x1b[{self.lines_drawn - 1}A"
-        seq += "\r\x1b[2K"
-        seq += "\n\r\x1b[2K" * (self.lines_drawn - 1)
-        if self.lines_drawn > 1:
-            seq += f"\x1b[{self.lines_drawn - 1}A"
-        seq += "\r"
-        self._out.write(seq)
-        self._out.flush()
-        self.lines_drawn = 0
-
-
 class Screen:
     """대체 화면 전체를 소유하는 프레임 라이터.
 
-    StatusArea와 달리 커서 산술이 없다. 화면이 통째로 우리 것이므로 매번 홈으로 가서
-    덮어쓰면 되고, 직전 프레임과 문자열이 같으면 아예 쓰지 않는다. 크기가 바뀌면
-    앞에 화면 지우기를 붙여 이전 크기의 잔상을 없앤다 — 리사이즈가 공짜로 처리된다.
+    커서 산술이 없다. 화면이 통째로 우리 것이므로 매번 홈으로 가서 덮어쓰면 되고,
+    직전 프레임과 문자열이 같으면 아예 쓰지 않는다. 크기가 바뀌면 앞에 화면 지우기를
+    붙여 이전 크기의 잔상을 없앤다 — 리사이즈가 공짜로 처리된다.
     """
 
     def __init__(self, out=None):
@@ -581,15 +510,4 @@ def enter_alt_screen(out=sys.stdout) -> None:
 
 def exit_alt_screen(out=sys.stdout) -> None:
     out.write("\x1b[?1049l")
-    out.flush()
-
-
-def draw_pager(pager: Pager, out=sys.stdout) -> None:
-    cols, rows = terminal_size()
-    height = max(1, rows - 1)
-    body = [truncate(line, cols) for line in pager.visible(height)]
-    last = min(pager.top + height, len(pager.lines))
-    hint = pager.status or pager.hint
-    footer = f"-- {pager.top + 1}-{last}/{len(pager.lines)}  {hint} --"
-    out.write("\x1b[2J\x1b[H" + "\r\n".join(body) + "\r\n" + truncate(footer, cols))
     out.flush()
