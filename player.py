@@ -11,9 +11,9 @@ from typing import Callable
 
 from comments import PAGE_SIZE, SORT_LABELS, CommentFeed, format_comments, next_sort
 from mpv_ipc import MpvClient, MpvError
-from tui import (KeyReader, LinePrompt, Pager, StatusArea, draw_pager, enter_alt_screen,
-                 exit_alt_screen, format_status_lines, parse_timecode, terminal_mode,
-                 terminal_size)
+from tui import (KeyReader, LinePrompt, Pager, Screen, comments_height, enter_alt_screen,
+                 exit_alt_screen, hide_cursor, parse_timecode, render_comments,
+                 render_playing, show_cursor, terminal_mode, terminal_size)
 
 _IPC_SOCKET = "/tmp/yp_mpv_socket"
 _COOKIE_BROWSER = "chrome"
@@ -130,7 +130,8 @@ class PlayerSession:
         self._comments_thread: threading.Thread | None = None
         self._comments_generation = 0
         self._feed: CommentFeed | None = None
-        self._status = StatusArea(sys.stdout)
+        self._screen = Screen(sys.stdout)
+        self._in_screen = False
         self._load_generation = 0
 
     # ----- lifecycle -----
@@ -164,10 +165,17 @@ class PlayerSession:
             self._term.__enter__()
             self._keys = KeyReader(sys.stdin.fileno(), self._client.events)
             self._keys.start()
+            # 화면 진입은 mpv 연결과 터미널 모드가 모두 성공한 뒤에 한다. 실패하면
+            # PlayerError 메시지가 평범한 화면에 정상 출력돼야 한다.
+            enter_alt_screen(sys.stdout)
+            hide_cursor(sys.stdout)
+            self._screen.reset()
+            self._in_screen = True
 
     def quit(self) -> None:
-        # load()가 예외로 빠져나갔으면 대체 화면이 아직 켜져 있을 수 있다. 멱등하므로
-        # 정상 경로에서 두 번 불려도 안전하고, 셸이 대체 화면에 갇히는 것을 막는다.
+        # 대체 화면 이탈은 여기 하나로 모인다. load()는 화면을 나가지 않으므로
+        # 정상 종료든 Ctrl-C로 빠져나온 경로든 복구는 전부 여기서 일어난다. 멱등하므로
+        # 두 번 불려도 안전하고, 셸이 대체 화면에 갇히는 것을 막는다.
         self._leave_screen()
         if self._keys is not None:
             self._keys.stop()
@@ -232,8 +240,9 @@ class PlayerSession:
                 if reason != "error" or self.closed:
                     break
         finally:
-            # 예외(Ctrl-C 포함)로 빠져나가도 대체 화면에서 반드시 나온다.
-            self._leave_screen()
+            # 화면에서 나가지는 않는다. 자동재생 체인 전체가 한 화면 세션이라
+            # 곡이 넘어갈 때 깜빡이지 않는다. 이탈은 quit()이 책임진다.
+            self._modal = None
         return reason
 
     def _wait_end(self, show_errors: bool) -> str:
@@ -371,8 +380,7 @@ class PlayerSession:
             self._flash("자동재생을 " + ("켰습니다" if self.autoplay else "껐습니다"))
         elif key == "g":
             self._modal = LinePrompt("이동할 시간 (0710 → 7:10 / 012930 → 1:29:30): ")
-            if self._tty:
-                self._status.draw([self._modal.render()])
+            self._redraw(force=True)
         elif key == "t":
             self._request_comments()
         else:
@@ -389,28 +397,25 @@ class PlayerSession:
         modal = self._modal
         if isinstance(modal, Pager):
             _, rows = terminal_size()
-            height = max(1, rows - 1)
+            height = comments_height(rows)
             if key == "s" and modal.status is None and self._feed is not None:
                 self._switch_comment_sort()
                 return
             if modal.handle_key(key, height):
+                # 페이저를 닫아도 화면에는 남아 있는다 — 카드 화면으로 돌아갈 뿐이다.
                 self._modal = None
-                if self._tty:
-                    exit_alt_screen(sys.stdout)
                 self._redraw(force=True)
                 return
             if modal.more and modal.status is None and self._feed is not None \
                     and modal.at_bottom(height):
                 self._request_more_comments()
                 return
-            if self._tty:
-                draw_pager(modal, sys.stdout)
+            self._redraw(force=True)
             return
         if isinstance(modal, LinePrompt):
             state = modal.handle_key(key)
             if state == "pending":
-                if self._tty:
-                    self._status.draw([modal.render()])
+                self._redraw(force=True)
                 return
             self._modal = None
             if state == "submit":
@@ -478,8 +483,7 @@ class PlayerSession:
         pager.status = None
         pager.more = bool(ev.get("more"))
         pager.append(ev.get("lines") or [])
-        if self._tty:
-            draw_pager(pager, sys.stdout)
+        self._redraw(force=True)
 
     def _replace_comments(self, ev: dict) -> None:
         """정렬을 바꿔 다시 불러온 목록으로 페이저 내용을 갈아끼운다."""
@@ -490,8 +494,7 @@ class PlayerSession:
         pager.top = 0
         pager.more = bool(ev.get("more"))
         pager.status = None
-        if self._tty:
-            draw_pager(pager, sys.stdout)
+        self._redraw(force=True)
 
     def _show_pager_status(self, text: str, more: bool | None = None) -> None:
         pager = self._modal
@@ -500,15 +503,14 @@ class PlayerSession:
         pager.status = text
         if more is not None:
             pager.more = more
-        if self._tty:
-            draw_pager(pager, sys.stdout)
+        self._redraw(force=True)
 
     def _open_pager(self, lines: list[str], more: bool = False) -> None:
         if not self._tty:
             return
+        # 이미 대체 화면 안이므로 enter_alt_screen을 다시 부르지 않는다.
         self._modal = Pager(lines, more=more, hint=_COMMENT_HINT)
-        enter_alt_screen(sys.stdout)
-        draw_pager(self._modal, sys.stdout)
+        self._redraw(force=True)
 
     # ----- screen -----
 
@@ -531,14 +533,22 @@ class PlayerSession:
                 "notice": self._message or self._notice, "prompt": prompt}
 
     def _redraw(self, force: bool = False) -> None:
-        if not self._tty or self._modal is not None:
+        # 모달이 열려 있어도 그린다. 댓글 패널 위쪽에 진행바가 남아, 읽는 동안에도
+        # 시간이 흐르는 게 보이는 것이 이 화면의 존재 이유다.
+        if not self._tty or not self._in_screen:
             return
         now = time.monotonic()
         if not force and now - self._last_draw < _REDRAW_INTERVAL:
             return
         self._last_draw = now
-        cols, _ = terminal_size()
-        self._status.draw(format_status_lines(self._state(), cols))
+        cols, rows = terminal_size()
+        state = self._state()
+        if isinstance(self._modal, Pager):
+            lines = render_comments(state, self._modal, cols, rows)
+        else:
+            # LinePrompt는 카드를 덮지 않는다. 마지막 행만 프롬프트가 차지한다.
+            lines = render_playing(state, cols, rows)
+        self._screen.draw(lines, cols, rows)
 
     def _print_line(self, text: str) -> None:
         if self._tty:
@@ -550,9 +560,9 @@ class PlayerSession:
             print(text)
 
     def _leave_screen(self) -> None:
-        """load()가 끝날 때 상태줄/페이저를 정리해 다음 print가 깨끗한 줄에 찍히게 한다."""
-        if self._tty:
-            if isinstance(self._modal, Pager):
-                exit_alt_screen(sys.stdout)
-            self._status.clear()
+        """대체 화면에서 나가 원래 터미널을 복구한다. 멱등하다."""
         self._modal = None
+        if self._in_screen:
+            show_cursor(sys.stdout)
+            exit_alt_screen(sys.stdout)
+            self._in_screen = False
