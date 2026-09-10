@@ -550,15 +550,6 @@ class PlayerSession:
             lines = render_playing(state, cols, rows)
         self._screen.draw(lines, cols, rows)
 
-    def _print_line(self, text: str) -> None:
-        if self._tty:
-            self._status.clear()
-            sys.stdout.write(text + "\n")
-            sys.stdout.flush()
-            self._redraw(force=True)
-        else:
-            print(text)
-
     def _leave_screen(self) -> None:
         """대체 화면에서 나가 원래 터미널을 복구한다. 멱등하다."""
         self._modal = None
