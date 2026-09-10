@@ -270,6 +270,43 @@ def format_status_lines(state: dict, width: int) -> list[str]:
     return lines
 
 
+def comments_height(rows: int) -> int:
+    """댓글 본문 높이. 헤더 2 + 구분선 1 + 푸터 1을 뺀다.
+
+    player.py의 키 처리도 반드시 이 함수를 써야 한다. 두 군데서 따로 계산하면
+    Pager.at_bottom()이 화면과 어긋나 다음 페이지 요청이 엉뚱한 데서 튄다.
+    """
+    return max(1, rows - 4)
+
+
+def _comments_header(state: dict, cols: int) -> list[str]:
+    left, right, pos, dur = _times(state)
+    head = str(state.get("title") or "")
+    channel = state.get("channel")
+    if channel:
+        head += f" · {channel}"
+    times = f"  {left} / {right}"
+    bar_width = max(4, cols - 2 - display_width(times))
+    return [
+        bold(_fit(" ♪ " + head, cols)),
+        " " + progress_bar(pos, dur, bar_width) + dim(_fit(times, cols - 1 - bar_width)),
+    ]
+
+
+def render_comments(state: dict, pager: "Pager", cols: int, rows: int) -> list[str]:
+    """댓글 패널 한 프레임. 위쪽에 곡 제목과 진행바가 남아 시간이 계속 흐르는 게 보인다."""
+    if rows <= 0:
+        return []
+    height = comments_height(rows)
+    body = [_fit(line, cols) for line in pager.visible(height)]
+    body += [""] * (height - len(body))
+    last = min(pager.top + height, len(pager.lines))
+    footer = f"-- {pager.top + 1}-{last}/{len(pager.lines)}  {pager.status or pager.hint} --"
+    lines = _comments_header(state, cols) + [dim("─" * cols)] + body + [dim(_fit(footer, cols))]
+    lines = lines[:rows]
+    return lines + [""] * (rows - len(lines))
+
+
 class Pager:
     DEFAULT_HINT = "j/k 스크롤 · space 페이지 · q 닫기"
 
