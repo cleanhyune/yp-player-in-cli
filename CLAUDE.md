@@ -122,7 +122,8 @@ yp._today() -> "YYYY-MM-DD"                    # 재탐색 판정용. 테스트�
 
 ## Demo GIFs
 
-`assets/demo-*.gif`는 `assets/demo-*.tape` ([vhs](https://github.com/charmbracelet/vhs)) 스크립트로 생성됨. 재생성 시:
+`assets/demo.gif` 하나만 둔다 — `assets/demo.tape` ([vhs](https://github.com/charmbracelet/vhs)) 스크립트로 생성됨. 검색 → 선택 → 카드 재생 → `q` 복귀만 담은 ~14초 클립이다 (기능별로 쪼갠 5개 GIF를 v0.8.0에서 이걸로 대체했다). 재생성 시:
 - `brew install vhs`, 검색어는 실제 업로드 영상만 나오는 걸로 (라이브 방송/과거 라이브 아카이브는 이 환경에서 HLS 스트림 오픈이 잘 실패함 — `python3.11 -c "from searcher import search; ..."`로 먼저 결과를 확인하고 `duration`이 있는 항목을 고를 것)
-- 녹화 중 실제로 오디오가 재생되므로 `~/.config/yp/state.json`의 `"volume"`을 임시로 `0`으로 바꿔 음소거한 뒤 복원
-- `vhs assets/demo-X.tape` 실행 → `assets/demo-X.gif` 생성
+- **음소거는 `state.json`의 `volume`이 아니라 시스템 출력으로 해야 한다.** 카드가 `vol N`을 그대로 화면에 띄우므로 yp 볼륨을 0으로 두면 GIF에 `vol 0`이 박힌다. macOS는 `osascript -e "set volume output muted true"` → 녹화 → `... muted false`
+- 검색이 끝날 때까지의 8초 남짓은 tape에서 `Hide`/`Show`로 잘라낸다. 안 자르면 클립의 절반이 빈 화면이 된다
+- `vhs assets/demo.tape` 실행 → `assets/demo.gif` 생성. 생성 후 `ffmpeg -i assets/demo.gif -vf fps=1 /tmp/f%02d.png`로 프레임을 뽑아 **눈으로 확인할 것** — 녹화가 성공해도 화면이 옳다는 보장은 없다
