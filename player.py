@@ -11,9 +11,9 @@ from typing import Callable
 
 from comments import PAGE_SIZE, SORT_LABELS, CommentFeed, format_comments, next_sort
 from mpv_ipc import MpvClient, MpvError
-from tui import (KeyReader, LinePrompt, Pager, StatusArea, draw_pager, enter_alt_screen,
-                 exit_alt_screen, format_status_lines, parse_timecode, terminal_mode,
-                 terminal_size)
+from tui import (KeyReader, LinePrompt, Pager, Screen, comments_height, enter_alt_screen,
+                 exit_alt_screen, hide_cursor, parse_timecode, render_comments,
+                 render_playing, show_cursor, terminal_mode, terminal_size)
 
 _IPC_SOCKET = "/tmp/yp_mpv_socket"
 _COOKIE_BROWSER = "chrome"
@@ -102,6 +102,13 @@ class PlayerSession:
         self.duration = 0.0
         self.paused = False
         self.title = ""
+        # yp가 재생 전에 아는 메타데이터. mpv의 media-title은 스트림이 열린 뒤에야
+        # 오므로, 이게 없으면 '스트림 연결 중' 몇 초 동안 카드가 비어 있다.
+        self.channel = ""
+        self.track_duration = 0.0
+        # 대체 화면 안에서 찍으면 나갈 때 사라진다. 여기 모아뒀다가 yp가 화면을
+        # 나온 뒤 출력한다.
+        self.errors: list[str] = []
         self.closed = False
         self._tty = tty
         self._client: MpvClient | None = None
@@ -112,6 +119,8 @@ class PlayerSession:
         self._next_hint: str | None = None
         self._message: str | None = None
         self._message_until = 0.0
+        # _message(3초 후 소멸)와 달리 스트림이 열릴 때까지 유지되는 안내.
+        self._notice: str | None = None
         self._modal: Pager | LinePrompt | None = None
         self._next_requested = False
         self._quit_requested = False
@@ -121,7 +130,8 @@ class PlayerSession:
         self._comments_thread: threading.Thread | None = None
         self._comments_generation = 0
         self._feed: CommentFeed | None = None
-        self._status = StatusArea(sys.stdout)
+        self._screen = Screen(sys.stdout)
+        self._in_screen = False
         self._load_generation = 0
 
     # ----- lifecycle -----
@@ -155,10 +165,17 @@ class PlayerSession:
             self._term.__enter__()
             self._keys = KeyReader(sys.stdin.fileno(), self._client.events)
             self._keys.start()
+            # 화면 진입은 mpv 연결과 터미널 모드가 모두 성공한 뒤에 한다. 실패하면
+            # PlayerError 메시지가 평범한 화면에 정상 출력돼야 한다.
+            enter_alt_screen(sys.stdout)
+            hide_cursor(sys.stdout)
+            self._screen.reset()
+            self._in_screen = True
 
     def quit(self) -> None:
-        # load()가 예외로 빠져나갔으면 대체 화면이 아직 켜져 있을 수 있다. 멱등하므로
-        # 정상 경로에서 두 번 불려도 안전하고, 셸이 대체 화면에 갇히는 것을 막는다.
+        # 대체 화면 이탈은 여기 하나로 모인다. load()는 화면을 나가지 않으므로
+        # 정상 종료든 Ctrl-C로 빠져나온 경로든 복구는 전부 여기서 일어난다. 멱등하므로
+        # 두 번 불려도 안전하고, 셸이 대체 화면에 갇히는 것을 막는다.
         self._leave_screen()
         if self._keys is not None:
             self._keys.stop()
@@ -223,8 +240,9 @@ class PlayerSession:
                 if reason != "error" or self.closed:
                     break
         finally:
-            # 예외(Ctrl-C 포함)로 빠져나가도 대체 화면에서 반드시 나온다.
-            self._leave_screen()
+            # 화면에서 나가지는 않는다. 자동재생 체인 전체가 한 화면 세션이라
+            # 곡이 넘어갈 때 깜빡이지 않는다. 이탈은 quit()이 책임진다.
+            self._modal = None
         return reason
 
     def _wait_end(self, show_errors: bool) -> str:
@@ -254,8 +272,9 @@ class PlayerSession:
             if kind == "property-change":
                 self._on_property(ev.get("name"), ev.get("data"))
             elif kind == "log-message":
-                if show_errors and self._modal is None:
-                    self._print_line(f"[mpv] {ev.get('prefix')}: {str(ev.get('text', '')).rstrip()}")
+                if show_errors:
+                    self.errors.append(
+                        f"[mpv] {ev.get('prefix')}: {str(ev.get('text', '')).rstrip()}")
             elif kind == "key":
                 self._on_key(str(ev.get("key")))
             elif kind == "comments-ready":
@@ -291,6 +310,8 @@ class PlayerSession:
         if name == "time-pos":
             if data is None:
                 return  # 파일 종료 직전에 오는 null은 마지막 위치를 지우지 않도록 무시
+            # 소리가 나기 시작했다 = '스트림 연결 중' 류의 안내는 역할이 끝났다.
+            self._notice = None
             self.position = float(data)
             now = time.monotonic()
             if self._position_cb is not None and now - self._last_position_cb >= _POSITION_INTERVAL:
@@ -304,7 +325,9 @@ class PlayerSession:
             if data is not None:
                 self.volume = int(round(float(data)))
         elif name == "media-title":
-            self.title = str(data or "")
+            # 빈 값으로 덮어쓰면 set_track이 미리 넣어둔 제목까지 날아간다.
+            if data:
+                self.title = str(data)
 
     def on_position(self, callback: Callable[[float], None]) -> None:
         self._position_cb = callback
@@ -315,6 +338,30 @@ class PlayerSession:
         self._next_hint = text
         if self._client is not None:
             self._client.events.put({"event": "redraw"})
+
+    def set_track(self, title: str, channel: str | None = None,
+                  duration: float | None = None) -> None:
+        """재생 전에 아는 메타데이터를 카드에 미리 올린다. 메인 스레드에서만 부른다."""
+        self.title = title or ""
+        self.channel = channel or ""
+        self.track_duration = float(duration or 0)
+        self._redraw(force=True)
+
+    def set_notice(self, text: str | None) -> None:
+        """안내 슬롯에 문구를 세운다. time-pos가 올 때마다(첫 번째뿐 아니라) 지워진다.
+
+        지금은 이게 안전하다 — 안내는 스트림이 열리기 전이나 곡과 곡 사이에만
+        세워지고, 그 동안은 mpv가 아직 time-pos를 보내지 않기 때문이다. 하지만
+        재생 '중'에 안내를 세우는 호출이 생기면 다음 time-pos 틱(~0.5초)에 바로
+        지워진다 — 최초 1회만 지우도록 플래그를 두는 건 지금은 쓸 곳이 없어
+        미룬 복잡도다.
+
+        set_next_hint와 달리 이벤트 큐를 거치지 않고 바로 그린다. 곡과 곡 사이
+        ('다음 영상을 찾는 중...')에는 _wait_end의 루프가 돌지 않아 큐에 넣어봐야
+        아무도 꺼내주지 않기 때문이다. 그래서 메인 스레드 전용이다.
+        """
+        self._notice = text
+        self._redraw(force=True)
 
     # ----- keys -----
 
@@ -333,8 +380,7 @@ class PlayerSession:
             self._flash("자동재생을 " + ("켰습니다" if self.autoplay else "껐습니다"))
         elif key == "g":
             self._modal = LinePrompt("이동할 시간 (0710 → 7:10 / 012930 → 1:29:30): ")
-            if self._tty:
-                self._status.draw([self._modal.render()])
+            self._redraw(force=True)
         elif key == "t":
             self._request_comments()
         else:
@@ -351,28 +397,25 @@ class PlayerSession:
         modal = self._modal
         if isinstance(modal, Pager):
             _, rows = terminal_size()
-            height = max(1, rows - 1)
+            height = comments_height(rows)
             if key == "s" and modal.status is None and self._feed is not None:
                 self._switch_comment_sort()
                 return
             if modal.handle_key(key, height):
+                # 페이저를 닫아도 화면에는 남아 있는다 — 카드 화면으로 돌아갈 뿐이다.
                 self._modal = None
-                if self._tty:
-                    exit_alt_screen(sys.stdout)
                 self._redraw(force=True)
                 return
             if modal.more and modal.status is None and self._feed is not None \
                     and modal.at_bottom(height):
                 self._request_more_comments()
                 return
-            if self._tty:
-                draw_pager(modal, sys.stdout)
+            self._redraw(force=True)
             return
         if isinstance(modal, LinePrompt):
             state = modal.handle_key(key)
             if state == "pending":
-                if self._tty:
-                    self._status.draw([modal.render()])
+                self._redraw(force=True)
                 return
             self._modal = None
             if state == "submit":
@@ -440,8 +483,7 @@ class PlayerSession:
         pager.status = None
         pager.more = bool(ev.get("more"))
         pager.append(ev.get("lines") or [])
-        if self._tty:
-            draw_pager(pager, sys.stdout)
+        self._redraw(force=True)
 
     def _replace_comments(self, ev: dict) -> None:
         """정렬을 바꿔 다시 불러온 목록으로 페이저 내용을 갈아끼운다."""
@@ -452,8 +494,7 @@ class PlayerSession:
         pager.top = 0
         pager.more = bool(ev.get("more"))
         pager.status = None
-        if self._tty:
-            draw_pager(pager, sys.stdout)
+        self._redraw(force=True)
 
     def _show_pager_status(self, text: str, more: bool | None = None) -> None:
         pager = self._modal
@@ -462,15 +503,14 @@ class PlayerSession:
         pager.status = text
         if more is not None:
             pager.more = more
-        if self._tty:
-            draw_pager(pager, sys.stdout)
+        self._redraw(force=True)
 
     def _open_pager(self, lines: list[str], more: bool = False) -> None:
         if not self._tty:
             return
+        # 이미 대체 화면 안이므로 enter_alt_screen을 다시 부르지 않는다.
         self._modal = Pager(lines, more=more, hint=_COMMENT_HINT)
-        enter_alt_screen(sys.stdout)
-        draw_pager(self._modal, sys.stdout)
+        self._redraw(force=True)
 
     # ----- screen -----
 
@@ -482,33 +522,38 @@ class PlayerSession:
     def _state(self) -> dict:
         if self._message and time.monotonic() > self._message_until:
             self._message = None
+        prompt = self._modal.render() if isinstance(self._modal, LinePrompt) else None
+        # notice가 message를 우선하므로 렌더러는 슬롯 하나만 보면 된다. message 키는
+        # 하위 호환을 위해 남긴다.
         return {"position": self.position, "duration": self.duration, "paused": self.paused,
                 "volume": self.volume, "autoplay": self.autoplay,
-                "next_hint": self._next_hint, "message": self._message}
+                "next_hint": self._next_hint, "message": self._message,
+                "title": self.title, "channel": self.channel,
+                "track_duration": self.track_duration,
+                "notice": self._message or self._notice, "prompt": prompt}
 
     def _redraw(self, force: bool = False) -> None:
-        if not self._tty or self._modal is not None:
+        # 모달이 열려 있어도 그린다. 댓글 패널 위쪽에 진행바가 남아, 읽는 동안에도
+        # 시간이 흐르는 게 보이는 것이 이 화면의 존재 이유다.
+        if not self._tty or not self._in_screen:
             return
         now = time.monotonic()
         if not force and now - self._last_draw < _REDRAW_INTERVAL:
             return
         self._last_draw = now
-        cols, _ = terminal_size()
-        self._status.draw(format_status_lines(self._state(), cols))
-
-    def _print_line(self, text: str) -> None:
-        if self._tty:
-            self._status.clear()
-            sys.stdout.write(text + "\n")
-            sys.stdout.flush()
-            self._redraw(force=True)
+        cols, rows = terminal_size()
+        state = self._state()
+        if isinstance(self._modal, Pager):
+            lines = render_comments(state, self._modal, cols, rows)
         else:
-            print(text)
+            # LinePrompt는 카드를 덮지 않는다. 마지막 행만 프롬프트가 차지한다.
+            lines = render_playing(state, cols, rows)
+        self._screen.draw(lines, cols, rows)
 
     def _leave_screen(self) -> None:
-        """load()가 끝날 때 상태줄/페이저를 정리해 다음 print가 깨끗한 줄에 찍히게 한다."""
-        if self._tty:
-            if isinstance(self._modal, Pager):
-                exit_alt_screen(sys.stdout)
-            self._status.clear()
+        """대체 화면에서 나가 원래 터미널을 복구한다. 멱등하다."""
         self._modal = None
+        if self._in_screen:
+            show_cursor(sys.stdout)
+            exit_alt_screen(sys.stdout)
+            self._in_screen = False

@@ -90,31 +90,203 @@ def truncate(text: str, width: int) -> str:
     return out + "…"
 
 
-def format_status(state: dict, width: int) -> str:
-    """제어줄: 재생 상태·시간·볼륨·자동재생·일시 메시지. 다음 영상 힌트는 별도 줄(format_next_line)."""
-    icon = "⏸" if state.get("paused") else "▶"
-    pos = format_duration(state.get("position") or 0)
-    dur = format_duration(state.get("duration") or 0)
-    parts = [
-        f"{icon} {pos} / {dur}",
-        f"vol {int(state.get('volume') or 0)}",
-        "자동재생 " + ("켜짐" if state.get("autoplay") else "꺼짐"),
+_BOLD, _DIM, _RESET = "\x1b[1m", "\x1b[2m", "\x1b[0m"
+# 두 문자의 East Asian Width 등급이 같아야 한다(둘 다 A). 등급이 섞이면
+# ambiguous를 2칸으로 렌더하는 터미널(한국어/일본어 로케일에서 흔함)에서 채운 칸만
+# 넓어져, 재생이 진행될수록 막대의 실제 폭이 자라고 프레임이 깨진다.
+_BAR_FULL, _BAR_EMPTY = "█", "▒"
+
+
+def styles_enabled() -> bool:
+    """비-tty에서는 애초에 화면을 그리지 않으므로 NO_COLOR만 보면 된다.
+
+    no-color.org 규약은 NO_COLOR가 non-empty 값일 때만 색을 끄도록 정의한다.
+    빈 문자열(NO_COLOR="")은 "설정 안 됨"과 같이 취급해 스타일을 켠 채로 둔다.
+    """
+    return not os.environ.get("NO_COLOR", "")
+
+
+def bold(text: str) -> str:
+    return f"{_BOLD}{text}{_RESET}" if styles_enabled() else text
+
+
+def dim(text: str) -> str:
+    return f"{_DIM}{text}{_RESET}" if styles_enabled() else text
+
+
+def _fit(text: str, width: int) -> str:
+    """평문을 width에 맞춰 자르고 오른쪽을 공백으로 채운다.
+
+    스타일은 반드시 이 뒤에 입힌다. display_width()가 ANSI를 셀 줄 모르기 때문이다.
+    """
+    if width <= 0:
+        return ""
+    text = truncate(text, width)
+    return text + " " * max(0, width - display_width(text))
+
+
+def progress_bar(position: float, duration: float, width: int) -> str:
+    """채운 칸은 기본색, 남은 칸은 dim. 길이를 모르면(duration<=0) 전부 남은 칸."""
+    if width <= 0:
+        return ""
+    if duration <= 0:
+        return dim(_BAR_EMPTY * width)
+    ratio = min(max(position / duration, 0.0), 1.0)
+    filled = int(round(ratio * width))
+    if filled <= 0:
+        return dim(_BAR_EMPTY * width)
+    if filled >= width:
+        return _BAR_FULL * width
+    return _BAR_FULL * filled + dim(_BAR_EMPTY * (width - filled))
+
+
+_CARD_MAX_WIDTH = 72       # 박스 전체 폭 상한 (테두리 포함)
+_CARD_MIN_COLS = 44        # 이보다 좁으면 박스를 포기하고 압축형
+_CARD_MIN_ROWS = 15        # 이보다 낮으면 박스를 포기하고 압축형
+_KEY_HINT = "q 종료   n 다음   a 자동재생   g 이동   t 댓글"
+
+
+def _times(state: dict) -> tuple[str, str, float, float]:
+    """(아이콘+현재시각, 전체시각, position, duration).
+
+    duration은 mpv가 보고한 값을 우선하고, 아직 없으면 yp가 검색 결과에서 알고 있는
+    track_duration으로 대신한다. 둘 다 없으면 0이고 화면엔 --:-- 이 뜬다.
+    """
+    pos = float(state.get("position") or 0)
+    dur = float(state.get("duration") or 0) or float(state.get("track_duration") or 0)
+    # "▶"(East Asian Width: A)와 일시정지 중 서로 바뀌어 그려지는 짝이다. "⏸"(N등급)를
+    # 쓰면 등급이 갈라져, ambiguous를 2칸으로 렌더하는 터미널(한국어 로케일에서 흔함)에서
+    # 토글할 때마다 이 줄의 폭이 흔들려 박스 오른쪽 테두리가 밀린다. "‖"는 A등급이라
+    # "▶"와 짝이 맞는다 — 되돌리지 말 것.
+    icon = "‖" if state.get("paused") else "▶"
+    left = f"{icon} {format_duration(int(pos))}"
+    right = format_duration(int(dur)) if dur > 0 else "--:--"
+    return left, right, pos, dur
+
+
+def _meta_text(state: dict) -> str:
+    on = "ON" if state.get("autoplay") else "OFF"
+    return f"vol {int(state.get('volume') or 0)}      자동재생 {on}"
+
+
+def _next_text(state: dict) -> str:
+    hint = state.get("next_hint")
+    return f"↳ {hint}" if hint else ""
+
+
+def _tail_line(state: dict, cols: int) -> str:
+    """마지막 행: 시간 이동 프롬프트가 열려 있으면 그것, 아니면 키 힌트."""
+    prompt = state.get("prompt")
+    if prompt:
+        # 커서를 숨긴 상태이므로 입력 끝을 밑줄로 표시한다.
+        return _fit("  " + str(prompt) + "_", cols)
+    return dim(_fit("  " + _KEY_HINT, cols))
+
+
+def _card_rows(state: dict, w: int) -> list[str]:
+    """박스 안쪽 11줄. 줄 수는 상태와 무관하게 고정이라 문구가 생겨도 밀리지 않는다."""
+    left, right, pos, dur = _times(state)
+    gap = max(1, w - display_width(left) - display_width(right))
+    return [
+        _fit("", w),
+        bold(_fit(str(state.get("title") or "(제목 없음)"), w)),
+        dim(_fit(str(state.get("channel") or ""), w)),
+        _fit("", w),
+        progress_bar(pos, dur, w),
+        dim(_fit(left + " " * gap + right, w)),
+        dim(_fit(str(state.get("notice") or ""), w)),
+        _fit("", w),
+        _fit(_meta_text(state), w),
+        dim(_fit(_next_text(state), w)),
+        _fit("", w),
     ]
-    if state.get("message"):
-        parts.append(str(state["message"]))
-    return truncate("  ".join(parts), width)
 
 
-def format_next_line(hint: str, width: int) -> str:
-    return truncate(f"다음: {hint}", width)
+def _boxed_card(state: dict, cols: int, height: int) -> list[str]:
+    outer = min(cols - 4, _CARD_MAX_WIDTH)
+    inner = outer - 2
+    margin = " " * ((cols - outer) // 2)
+    rows = _card_rows(state, inner - 4)
+    box = [margin + "┌" + "─" * inner + "┐"]
+    box += [margin + "│  " + row + "  │" for row in rows]
+    box.append(margin + "└" + "─" * inner + "┘")
+    return [""] * max(0, (height - len(box)) // 2) + box
 
 
-def format_status_lines(state: dict, width: int) -> list[str]:
-    """상태 영역 전체. 자동재생이 켜져 있고 다음 영상이 정해졌으면 둘째 줄에 힌트가 폭 전체를 쓴다."""
-    lines = [format_status(state, width)]
-    if state.get("autoplay") and state.get("next_hint"):
-        lines.append(format_next_line(str(state["next_hint"]), width))
-    return lines
+def _compact_card(state: dict, cols: int) -> list[str]:
+    """박스를 그릴 자리가 없을 때의 4줄. 마지막 행 키 힌트는 호출자가 붙인다."""
+    w = max(0, cols - 2)
+    left, right, pos, dur = _times(state)
+    head = str(state.get("title") or "(제목 없음)")
+    channel = state.get("channel")
+    if channel:
+        head += f" · {channel}"
+    notice = state.get("notice") or _next_text(state)
+    return [
+        bold(_fit(" ♪ " + head, cols)),
+        " " + progress_bar(pos, dur, w),
+        dim(_fit(f" {left} / {right}   {_meta_text(state)}", cols)),
+        dim(_fit(" " + str(notice), cols)),
+    ]
+
+
+def render_playing(state: dict, cols: int, rows: int) -> list[str]:
+    """재생 화면 한 프레임. 반환 줄 수는 항상 rows와 같다.
+
+    각 줄은 이미 cols 안에 맞춰져 있으므로 호출자가 다시 자르면 안 된다 (ANSI가 깨진다).
+    """
+    if rows <= 0:
+        return []
+    body_height = rows - 1
+    if rows < _CARD_MIN_ROWS or cols < _CARD_MIN_COLS:
+        body = _compact_card(state, cols)
+    else:
+        body = _boxed_card(state, cols, body_height)
+    body = body[:body_height]
+    body += [""] * (body_height - len(body))
+    return body + [_tail_line(state, cols)]
+
+
+def comments_height(rows: int) -> int:
+    """댓글 본문 높이. 헤더 2 + 구분선 1 + 푸터 1을 뺀다.
+
+    player.py의 키 처리도 반드시 이 함수를 써야 한다. 두 군데서 따로 계산하면
+    Pager.at_bottom()이 화면과 어긋나 다음 페이지 요청이 엉뚱한 데서 튄다.
+    """
+    return max(1, rows - 4)
+
+
+def _comments_header(state: dict, cols: int) -> list[str]:
+    left, right, pos, dur = _times(state)
+    head = str(state.get("title") or "")
+    channel = state.get("channel")
+    if channel:
+        head += f" · {channel}"
+    times = f"  {left} / {right}"
+    # 막대는 최소 4칸을 원한다. 하지만 선두 공백 1칸을 뺀 나머지 폭을 넘으면 안 된다 —
+    # 상한을 두지 않으면 cols가 작을 때 "공백 1 + 막대 최소 4"가 이미 cols를 넘어서고,
+    # 뒤따르는 _fit(times, ...)는 음수 폭을 0으로 클램프할 뿐 그 초과분을 되돌리지
+    # 못해 이 줄이 "반환 줄은 항상 cols 안" 계약을 어기게 된다.
+    wanted = max(4, cols - 2 - display_width(times))
+    bar_width = max(0, min(wanted, cols - 1))
+    return [
+        bold(_fit(" ♪ " + head, cols)),
+        (" " if cols > 0 else "") + progress_bar(pos, dur, bar_width) + dim(_fit(times, cols - 1 - bar_width)),
+    ]
+
+
+def render_comments(state: dict, pager: "Pager", cols: int, rows: int) -> list[str]:
+    """댓글 패널 한 프레임. 위쪽에 곡 제목과 진행바가 남아 시간이 계속 흐르는 게 보인다."""
+    if rows <= 0:
+        return []
+    height = comments_height(rows)
+    body = [_fit(line, cols) for line in pager.visible(height)]
+    body += [""] * (height - len(body))
+    last = min(pager.top + height, len(pager.lines))
+    footer = f"-- {pager.top + 1}-{last}/{len(pager.lines)}  {pager.status or pager.hint} --"
+    lines = _comments_header(state, cols) + [dim("─" * cols)] + body + [dim(_fit(footer, cols))]
+    lines = lines[:rows]
+    return lines + [""] * (rows - len(lines))
 
 
 class Pager:
@@ -293,48 +465,46 @@ def terminal_size() -> os.terminal_size:
     return shutil.get_terminal_size((80, 24))
 
 
-class StatusArea:
-    """여러 줄 상태 영역. 마지막으로 그린 줄 수를 기억해 다시 그릴 때 같은 자리에 덮어쓴다.
+class Screen:
+    """대체 화면 전체를 소유하는 프레임 라이터.
 
-    그린 뒤 커서는 마지막 줄 끝에 남는다. 다시 그릴 땐 커서를 (줄 수 - 1)만큼 올려 첫 줄부터
-    덮어쓰고, 줄 수가 줄었으면 남은 줄을 지운 뒤 커서를 새 마지막 줄로 되돌린다.
-    clear()는 영역을 전부 지우고 커서를 첫 줄 맨 앞에 두어 다음 print가 그 자리에 찍히게 한다.
+    커서 산술이 없다. 화면이 통째로 우리 것이므로 매번 홈으로 가서 덮어쓰면 되고,
+    직전 프레임과 문자열이 같으면 아예 쓰지 않는다. 크기가 바뀌면 앞에 화면 지우기를
+    붙여 이전 크기의 잔상을 없앤다 — 리사이즈가 공짜로 처리된다.
     """
 
     def __init__(self, out=None):
         self._out = out if out is not None else sys.stdout
-        self.lines_drawn = 0
+        self._last: str | None = None
+        self._size: tuple[int, int] | None = None
 
-    def draw(self, lines: list[str]) -> None:
-        seq = ""
-        if self.lines_drawn > 1:
-            seq += f"\x1b[{self.lines_drawn - 1}A"
-        for index, line in enumerate(lines):
-            if index:
-                seq += "\n"
-            seq += "\r\x1b[2K" + line
-        extra = self.lines_drawn - len(lines)
-        if extra > 0:
-            seq += "\n\r\x1b[2K" * extra
-            seq += f"\x1b[{extra}A"
-        self._out.write(seq)
-        self._out.flush()
-        self.lines_drawn = len(lines)
-
-    def clear(self) -> None:
-        if self.lines_drawn == 0:
+    def draw(self, lines: list[str], cols: int, rows: int) -> None:
+        frame = "\x1b[H" + "\r\n".join(line + "\x1b[K" for line in lines)
+        resized = self._size != (cols, rows)
+        if resized:
+            self._size = (cols, rows)
+        if not resized and frame == self._last:
             return
-        seq = ""
-        if self.lines_drawn > 1:
-            seq += f"\x1b[{self.lines_drawn - 1}A"
-        seq += "\r\x1b[2K"
-        seq += "\n\r\x1b[2K" * (self.lines_drawn - 1)
-        if self.lines_drawn > 1:
-            seq += f"\x1b[{self.lines_drawn - 1}A"
-        seq += "\r"
-        self._out.write(seq)
+        self._last = frame
+        if resized:
+            frame = "\x1b[2J" + frame
+        self._out.write(frame)
         self._out.flush()
-        self.lines_drawn = 0
+
+    def reset(self) -> None:
+        """대체 화면에 갓 들어왔을 때처럼, 다음 draw가 반드시 쓰도록 캐시를 버린다."""
+        self._last = None
+        self._size = None
+
+
+def hide_cursor(out=sys.stdout) -> None:
+    out.write("\x1b[?25l")
+    out.flush()
+
+
+def show_cursor(out=sys.stdout) -> None:
+    out.write("\x1b[?25h")
+    out.flush()
 
 
 def enter_alt_screen(out=sys.stdout) -> None:
@@ -344,15 +514,4 @@ def enter_alt_screen(out=sys.stdout) -> None:
 
 def exit_alt_screen(out=sys.stdout) -> None:
     out.write("\x1b[?1049l")
-    out.flush()
-
-
-def draw_pager(pager: Pager, out=sys.stdout) -> None:
-    cols, rows = terminal_size()
-    height = max(1, rows - 1)
-    body = [truncate(line, cols) for line in pager.visible(height)]
-    last = min(pager.top + height, len(pager.lines))
-    hint = pager.status or pager.hint
-    footer = f"-- {pager.top + 1}-{last}/{len(pager.lines)}  {hint} --"
-    out.write("\x1b[2J\x1b[H" + "\r\n".join(body) + "\r\n" + truncate(footer, cols))
     out.flush()
