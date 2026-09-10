@@ -91,7 +91,10 @@ def truncate(text: str, width: int) -> str:
 
 
 _BOLD, _DIM, _RESET = "\x1b[1m", "\x1b[2m", "\x1b[0m"
-_BAR_FULL, _BAR_EMPTY = "█", "░"
+# 두 문자의 East Asian Width 등급이 같아야 한다(둘 다 A). 등급이 섞이면
+# ambiguous를 2칸으로 렌더하는 터미널(한국어/일본어 로케일에서 흔함)에서 채운 칸만
+# 넓어져, 재생이 진행될수록 막대의 실제 폭이 자라고 프레임이 깨진다.
+_BAR_FULL, _BAR_EMPTY = "█", "▒"
 
 
 def styles_enabled() -> bool:
