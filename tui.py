@@ -98,8 +98,12 @@ _BAR_FULL, _BAR_EMPTY = "█", "▒"
 
 
 def styles_enabled() -> bool:
-    """비-tty에서는 애초에 화면을 그리지 않으므로 NO_COLOR만 보면 된다."""
-    return os.environ.get("NO_COLOR") is None
+    """비-tty에서는 애초에 화면을 그리지 않으므로 NO_COLOR만 보면 된다.
+
+    no-color.org 규약은 NO_COLOR가 non-empty 값일 때만 색을 끄도록 정의한다.
+    빈 문자열(NO_COLOR="")은 "설정 안 됨"과 같이 취급해 스타일을 켠 채로 둔다.
+    """
+    return not os.environ.get("NO_COLOR", "")
 
 
 def bold(text: str) -> str:
