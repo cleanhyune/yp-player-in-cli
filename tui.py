@@ -90,6 +90,49 @@ def truncate(text: str, width: int) -> str:
     return out + "…"
 
 
+_BOLD, _DIM, _RESET = "\x1b[1m", "\x1b[2m", "\x1b[0m"
+_BAR_FULL, _BAR_EMPTY = "█", "░"
+
+
+def styles_enabled() -> bool:
+    """비-tty에서는 애초에 화면을 그리지 않으므로 NO_COLOR만 보면 된다."""
+    return os.environ.get("NO_COLOR") is None
+
+
+def bold(text: str) -> str:
+    return f"{_BOLD}{text}{_RESET}" if styles_enabled() else text
+
+
+def dim(text: str) -> str:
+    return f"{_DIM}{text}{_RESET}" if styles_enabled() else text
+
+
+def _fit(text: str, width: int) -> str:
+    """평문을 width에 맞춰 자르고 오른쪽을 공백으로 채운다.
+
+    스타일은 반드시 이 뒤에 입힌다. display_width()가 ANSI를 셀 줄 모르기 때문이다.
+    """
+    if width <= 0:
+        return ""
+    text = truncate(text, width)
+    return text + " " * max(0, width - display_width(text))
+
+
+def progress_bar(position: float, duration: float, width: int) -> str:
+    """채운 칸은 기본색, 남은 칸은 dim. 길이를 모르면(duration<=0) 전부 남은 칸."""
+    if width <= 0:
+        return ""
+    if duration <= 0:
+        return dim(_BAR_EMPTY * width)
+    ratio = min(max(position / duration, 0.0), 1.0)
+    filled = int(round(ratio * width))
+    if filled <= 0:
+        return dim(_BAR_EMPTY * width)
+    if filled >= width:
+        return _BAR_FULL * width
+    return _BAR_FULL * filled + dim(_BAR_EMPTY * (width - filled))
+
+
 def format_status(state: dict, width: int) -> str:
     """제어줄: 재생 상태·시간·볼륨·자동재생·일시 메시지. 다음 영상 힌트는 별도 줄(format_next_line)."""
     icon = "⏸" if state.get("paused") else "▶"
