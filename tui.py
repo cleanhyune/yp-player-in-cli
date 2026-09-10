@@ -286,10 +286,15 @@ def _comments_header(state: dict, cols: int) -> list[str]:
     if channel:
         head += f" · {channel}"
     times = f"  {left} / {right}"
-    bar_width = max(4, cols - 2 - display_width(times))
+    # 막대는 최소 4칸을 원한다. 하지만 선두 공백 1칸을 뺀 나머지 폭을 넘으면 안 된다 —
+    # 상한을 두지 않으면 cols가 작을 때 "공백 1 + 막대 최소 4"가 이미 cols를 넘어서고,
+    # 뒤따르는 _fit(times, ...)는 음수 폭을 0으로 클램프할 뿐 그 초과분을 되돌리지
+    # 못해 이 줄이 "반환 줄은 항상 cols 안" 계약을 어기게 된다.
+    wanted = max(4, cols - 2 - display_width(times))
+    bar_width = max(0, min(wanted, cols - 1))
     return [
         bold(_fit(" ♪ " + head, cols)),
-        " " + progress_bar(pos, dur, bar_width) + dim(_fit(times, cols - 1 - bar_width)),
+        (" " if cols > 0 else "") + progress_bar(pos, dur, bar_width) + dim(_fit(times, cols - 1 - bar_width)),
     ]
 
 
