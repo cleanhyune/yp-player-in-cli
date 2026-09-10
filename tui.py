@@ -532,6 +532,48 @@ class StatusArea:
         self.lines_drawn = 0
 
 
+class Screen:
+    """대체 화면 전체를 소유하는 프레임 라이터.
+
+    StatusArea와 달리 커서 산술이 없다. 화면이 통째로 우리 것이므로 매번 홈으로 가서
+    덮어쓰면 되고, 직전 프레임과 문자열이 같으면 아예 쓰지 않는다. 크기가 바뀌면
+    앞에 화면 지우기를 붙여 이전 크기의 잔상을 없앤다 — 리사이즈가 공짜로 처리된다.
+    """
+
+    def __init__(self, out=None):
+        self._out = out if out is not None else sys.stdout
+        self._last: str | None = None
+        self._size: tuple[int, int] | None = None
+
+    def draw(self, lines: list[str], cols: int, rows: int) -> None:
+        frame = "\x1b[H" + "\r\n".join(line + "\x1b[K" for line in lines)
+        resized = self._size != (cols, rows)
+        if resized:
+            self._size = (cols, rows)
+        if not resized and frame == self._last:
+            return
+        self._last = frame
+        if resized:
+            frame = "\x1b[2J" + frame
+        self._out.write(frame)
+        self._out.flush()
+
+    def reset(self) -> None:
+        """대체 화면에 갓 들어왔을 때처럼, 다음 draw가 반드시 쓰도록 캐시를 버린다."""
+        self._last = None
+        self._size = None
+
+
+def hide_cursor(out=sys.stdout) -> None:
+    out.write("\x1b[?25l")
+    out.flush()
+
+
+def show_cursor(out=sys.stdout) -> None:
+    out.write("\x1b[?25h")
+    out.flush()
+
+
 def enter_alt_screen(out=sys.stdout) -> None:
     out.write("\x1b[?1049h\x1b[H")
     out.flush()
