@@ -102,6 +102,13 @@ class PlayerSession:
         self.duration = 0.0
         self.paused = False
         self.title = ""
+        # yp가 재생 전에 아는 메타데이터. mpv의 media-title은 스트림이 열린 뒤에야
+        # 오므로, 이게 없으면 '스트림 연결 중' 몇 초 동안 카드가 비어 있다.
+        self.channel = ""
+        self.track_duration = 0.0
+        # 대체 화면 안에서 찍으면 나갈 때 사라진다. 여기 모아뒀다가 yp가 화면을
+        # 나온 뒤 출력한다.
+        self.errors: list[str] = []
         self.closed = False
         self._tty = tty
         self._client: MpvClient | None = None
@@ -112,6 +119,8 @@ class PlayerSession:
         self._next_hint: str | None = None
         self._message: str | None = None
         self._message_until = 0.0
+        # _message(3초 후 소멸)와 달리 스트림이 열릴 때까지 유지되는 안내.
+        self._notice: str | None = None
         self._modal: Pager | LinePrompt | None = None
         self._next_requested = False
         self._quit_requested = False
@@ -254,8 +263,9 @@ class PlayerSession:
             if kind == "property-change":
                 self._on_property(ev.get("name"), ev.get("data"))
             elif kind == "log-message":
-                if show_errors and self._modal is None:
-                    self._print_line(f"[mpv] {ev.get('prefix')}: {str(ev.get('text', '')).rstrip()}")
+                if show_errors:
+                    self.errors.append(
+                        f"[mpv] {ev.get('prefix')}: {str(ev.get('text', '')).rstrip()}")
             elif kind == "key":
                 self._on_key(str(ev.get("key")))
             elif kind == "comments-ready":
@@ -291,6 +301,8 @@ class PlayerSession:
         if name == "time-pos":
             if data is None:
                 return  # 파일 종료 직전에 오는 null은 마지막 위치를 지우지 않도록 무시
+            # 소리가 나기 시작했다 = '스트림 연결 중' 류의 안내는 역할이 끝났다.
+            self._notice = None
             self.position = float(data)
             now = time.monotonic()
             if self._position_cb is not None and now - self._last_position_cb >= _POSITION_INTERVAL:
@@ -304,7 +316,9 @@ class PlayerSession:
             if data is not None:
                 self.volume = int(round(float(data)))
         elif name == "media-title":
-            self.title = str(data or "")
+            # 빈 값으로 덮어쓰면 set_track이 미리 넣어둔 제목까지 날아간다.
+            if data:
+                self.title = str(data)
 
     def on_position(self, callback: Callable[[float], None]) -> None:
         self._position_cb = callback
@@ -315,6 +329,24 @@ class PlayerSession:
         self._next_hint = text
         if self._client is not None:
             self._client.events.put({"event": "redraw"})
+
+    def set_track(self, title: str, channel: str | None = None,
+                  duration: float | None = None) -> None:
+        """재생 전에 아는 메타데이터를 카드에 미리 올린다. 메인 스레드에서만 부른다."""
+        self.title = title or ""
+        self.channel = channel or ""
+        self.track_duration = float(duration or 0)
+        self._redraw(force=True)
+
+    def set_notice(self, text: str | None) -> None:
+        """안내 슬롯에 문구를 세운다. 첫 time-pos가 오면 자동으로 지워진다.
+
+        set_next_hint와 달리 이벤트 큐를 거치지 않고 바로 그린다. 곡과 곡 사이
+        ('다음 영상을 찾는 중...')에는 _wait_end의 루프가 돌지 않아 큐에 넣어봐야
+        아무도 꺼내주지 않기 때문이다. 그래서 메인 스레드 전용이다.
+        """
+        self._notice = text
+        self._redraw(force=True)
 
     # ----- keys -----
 
@@ -482,9 +514,15 @@ class PlayerSession:
     def _state(self) -> dict:
         if self._message and time.monotonic() > self._message_until:
             self._message = None
+        prompt = self._modal.render() if isinstance(self._modal, LinePrompt) else None
+        # notice가 message를 우선하므로 렌더러는 슬롯 하나만 보면 된다. message 키는
+        # 하위 호환을 위해 남긴다.
         return {"position": self.position, "duration": self.duration, "paused": self.paused,
                 "volume": self.volume, "autoplay": self.autoplay,
-                "next_hint": self._next_hint, "message": self._message}
+                "next_hint": self._next_hint, "message": self._message,
+                "title": self.title, "channel": self.channel,
+                "track_duration": self.track_duration,
+                "notice": self._message or self._notice, "prompt": prompt}
 
     def _redraw(self, force: bool = False) -> None:
         if not self._tty or self._modal is not None:
