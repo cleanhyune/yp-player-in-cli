@@ -37,6 +37,10 @@ comments.py   # CommentFeed: paged root-comment fetching with cross-page dedupe 
     mpv 오류는 `session.errors`에 버퍼링해 `quit()` 뒤에 찍는다. `set_notice()`는
     `set_next_hint()`와 달리 이벤트 큐를 거치지 않고 바로 그린다 — 곡과 곡 사이에는
     `_wait_end`의 루프가 돌지 않아 큐에 넣으면 아무도 꺼내지 않기 때문이다 (메인 스레드 전용).
+    안내는 `time-pos`가 올 때마다(최초 1회가 아니라 매번) 지워지므로, 재생 '중'에
+    `set_notice()`를 부르면 다음 time-pos 틱(~0.5초)에 바로 사라진다 — 지금은 스트림이
+    열리기 전이나 곡 사이(아직 time-pos가 없는 구간)에서만 불러 문제가 안 되지만, 재생
+    중 호출하는 용도로 쓰려면 최초 1회만 지우는 플래그를 먼저 추가해야 한다.
   - **스타일은 bold/dim만** — 색상은 사용자 터미널 테마와 충돌하므로 쓰지 않는다.
     `NO_COLOR`가 있으면 둘 다 끈다. 규칙 하나: **평문으로 자르고 패딩한 뒤 스타일을 입힌다.**
     `display_width()`는 ANSI를 셀 줄 모르므로 순서가 뒤집히면 CJK 제목에서 폭이 조용히 깨진다.
@@ -77,7 +81,7 @@ select_recent(items) -> url | NEW_SEARCH | None
 
 session = PlayerSession(volume, autoplay, tty, strategy); session.start()   # 대체 화면 진입
 session.set_track(title, channel, duration)   # 카드에 미리 올릴 메타데이터 (mpv의 media-title은 늦게 온다)
-session.set_notice(text | None)               # 안내 슬롯. 첫 time-pos에 자동 소멸. 메인 스레드 전용
+session.set_notice(text | None)               # 안내 슬롯. time-pos가 올 때마다 지워진다(첫 번째만이 아님). 메인 스레드 전용
 session.load(url, start) -> "eof" | "quit" | "next" | "error"   # blocks until the file ends
 session.autoplay / session.volume / session.position           # read after load()
 session.strategy                                               # 실제로 스트림을 연 player_client
