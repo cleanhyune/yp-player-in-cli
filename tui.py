@@ -211,7 +211,7 @@ def _boxed_card(state: dict, cols: int, height: int) -> list[str]:
 
 def _compact_card(state: dict, cols: int) -> list[str]:
     """박스를 그릴 자리가 없을 때의 4줄. 마지막 행 키 힌트는 호출자가 붙인다."""
-    w = max(8, cols - 2)
+    w = max(0, cols - 2)
     left, right, pos, dur = _times(state)
     head = str(state.get("title") or "(제목 없음)")
     channel = state.get("channel")
