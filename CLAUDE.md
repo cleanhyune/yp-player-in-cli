@@ -5,7 +5,7 @@ CLI tool that searches YouTube and plays audio-only via mpv. macOS only.
 ## Structure
 
 ```
-yp.py         # Entry point: search→select→PlayerSession loop, autoplay chain, -r/--recent
+yp.py         # Entry point: search→select→PlayerSession loop, autoplay chain (n/p로 앞뒤 이동), -r/--recent
 searcher.py   # YouTube search via yt-dlp YoutubeDL API
 selector.py   # Arrow-key selection UI via questionary (search results + recent history)
 player.py     # PlayerSession: one mpv process per playback session, driven over JSON IPC
@@ -21,7 +21,8 @@ comments.py   # CommentFeed: paged root-comment fetching with cross-page dedupe 
 - **yt-dlp Python API** (not subprocess) — `YoutubeDL` class with `extract_flat: True` for fast search without fetching full metadata
 - **`_SilentLogger`** in `searcher.py` — suppresses yt-dlp's Python version deprecation warnings
 - **Autoplay via sidebar scraping, not yt-dlp** — `related.py` fetches the watch page HTML directly and parses the `ytInitialData` JSON blob for the real "related videos" sidebar (`lockupViewModel` entries under `contents.twoColumnWatchNextResults.secondaryResults...`). An earlier version used yt-dlp's `RD<video_id>` mix playlist, but that mix doesn't exist for many videos (e.g. broadcast/drama clips) — see [[autoplay_related_videos]] memory. yt-dlp deliberately doesn't expose this sidebar, so this parsing is unofficial and self-maintained: if YouTube changes the JSON shape, only fixing `related.py` (not `pip install -U yt-dlp`) will help. `fetch_next()` swallows every exception internally so a broken parse can never propagate into the autoplay loop
-- **One mpv per playback session, Python owns the terminal** — `PlayerSession.start()` launches `mpv --no-video --no-terminal --idle=yes --input-ipc-server=/tmp/yp_mpv_socket` once; each video is a `loadfile` over IPC, so autoplay/`n` transitions have no process restart and volume/pause state survives. Because mpv has no terminal, `tui.KeyReader` reads stdin in cbreak mode (not raw — Ctrl+C must still raise `KeyboardInterrupt`) and forwards unknown keys to mpv via the `keypress` IPC command, so mpv's default bindings (space, arrows, 9/0, m) keep working. Intercepted keys: `q` quit, `n` next, `a` autoplay toggle, `g` timecode prompt, `t` comments pager (and inside the pager, `s` toggles comment sort).
+- **`n`/`p`는 재생목록 위의 이동이지 '다음/이전 추천'이 아니다** — `yp._play_session`이 지나온 곡을 `chain: list[dict]` + `index`로 들고 있고, `n`/자동재생은 index를 올리며(체인 끝일 때만 `_Prefetch`로 다음 곡을 뽑아 append) `p`는 내린다. 체인을 자르지 않기 때문에 `p` 뒤의 `n`은 떠났던 바로 그 곡으로 돌아온다 — 별도 로직이 아니라 자료구조에서 따라온다. 세 가지가 여기 붙어 있다: (1) player는 재생목록을 모르고 `session.has_prev` 불리언만 본다. 첫 곡에서 `p`는 스트림을 끊지 않고 메시지만 띄운다 (같은 곡을 다시 여는 스트림 재해석 2~3초를 아끼고, mpv 기본 `p`=일시정지가 새어나가지 않게 삼킨다). (2) `history.resume_position`은 **세션 안에서 그 자리를 처음 재생할 때만** 적용한다(`seen: set[int]`) — 되감아 돌아왔는데 방금 넘긴 지점으로 되돌리면 "이전 곡"이 아니다. `history`의 기록 자체는 그대로 남아 다음 *실행*의 이어보기는 살아 있다. (3) 체인 끝에서 돈 `_Prefetch`는 `prefetches: dict[index, _Prefetch]`에 남겨 `p`로 지나쳤다 `n`으로 돌아와도 같은 조회를 두 번 하지 않는다 (`_Prefetch`는 완료 시 스스로 힌트를 올리므로, 재사용할 때는 `_hint()`로 직접 세워줘야 한다)
+- **One mpv per playback session, Python owns the terminal** — `PlayerSession.start()` launches `mpv --no-video --no-terminal --idle=yes --input-ipc-server=/tmp/yp_mpv_socket` once; each video is a `loadfile` over IPC, so autoplay/`n` transitions have no process restart and volume/pause state survives. Because mpv has no terminal, `tui.KeyReader` reads stdin in cbreak mode (not raw — Ctrl+C must still raise `KeyboardInterrupt`) and forwards unknown keys to mpv via the `keypress` IPC command, so mpv's default bindings (space, arrows, 9/0, m) keep working. Intercepted keys: `q` quit, `n` next, `p` prev, `a` autoplay toggle, `g` timecode prompt, `t` comments pager (and inside the pager, `s` toggles comment sort).
   Python이 재생 중 터미널 전체를 소유한다: `start()`에서 대체 화면(alt screen)에 들어가
   `quit()`에서 나오므로 자동재생 체인 전체가 한 화면 세션이고 곡 전환에 깜빡임이 없다.
   `tui.render_playing()` / `render_comments()`가 화면 한 프레임을 `list[str]`로 만드는
@@ -82,7 +83,8 @@ select_recent(items) -> url | NEW_SEARCH | None
 session = PlayerSession(volume, autoplay, tty, strategy); session.start()   # 대체 화면 진입
 session.set_track(title, channel, duration)   # 카드에 미리 올릴 메타데이터 (mpv의 media-title은 늦게 온다)
 session.set_notice(text | None)               # 안내 슬롯. time-pos가 올 때마다 지워진다(첫 번째만이 아님). 메인 스레드 전용
-session.load(url, start) -> "eof" | "quit" | "next" | "error"   # blocks until the file ends
+session.has_prev = bool                       # 돌아갈 이전 곡이 있는지. 매 load() 전에 yp가 세운다
+session.load(url, start) -> "eof" | "quit" | "next" | "prev" | "error"   # blocks until the file ends
 session.autoplay / session.volume / session.position           # read after load()
 session.strategy                                               # 실제로 스트림을 연 player_client
 session.errors                                # 버퍼된 mpv 오류. quit() 뒤에 출력할 것
@@ -93,7 +95,8 @@ render_comments(state, pager, cols, rows) -> list[str]         # 길이는 항�
 comments_height(rows) -> int                                   # 페이저 본문 높이. 유일한 출처
 progress_bar(position, duration, width) -> str                 # ANSI 제거 시 폭이 정확히 width
 
-# yp._play_session: reason이 "eof"(autoplay on) 또는 "next"인 동안 prefetch 결과로 load()를 반복
+# yp._play_session: chain(list) + index로 재생목록을 들고 돈다. "eof"(autoplay on)/"next"는
+#   index를 올리고(체인 끝이면 prefetch 결과를 append), "prev"는 내린다
 fetch_next(url, played_ids, current_channel) -> {"title", "channel", "url"} | None   # 같은 채널 우선
 
 feed = CommentFeed(url, sort="top"|"new")      # 'top'은 요청마다 순서가 흔들려 중복 제거 필요

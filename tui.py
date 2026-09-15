@@ -143,7 +143,7 @@ def progress_bar(position: float, duration: float, width: int) -> str:
 _CARD_MAX_WIDTH = 72       # 박스 전체 폭 상한 (테두리 포함)
 _CARD_MIN_COLS = 44        # 이보다 좁으면 박스를 포기하고 압축형
 _CARD_MIN_ROWS = 15        # 이보다 낮으면 박스를 포기하고 압축형
-_KEY_HINT = "q 종료   n 다음   a 자동재생   g 이동   t 댓글"
+_KEY_HINT = "q 종료   p 이전   n 다음   a 자동재생   g 이동   t 댓글"
 
 
 def _times(state: dict) -> tuple[str, str, float, float]:

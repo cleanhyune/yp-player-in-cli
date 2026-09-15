@@ -17,6 +17,11 @@ from selector import (NEW_SEARCH, NEXT_PAGE, PREV_PAGE, format_duration,
 MAX_PAGES = 3
 
 
+def _hint(video: dict) -> str:
+    """카드 아래 '↳ 다음 곡' 한 줄. 조회 결과와 체인 재사용이 같은 문구를 쓰도록 모은다."""
+    return f"{video['title']} · {video['channel']}"
+
+
 def _today() -> str:
     return date.today().isoformat()
 
@@ -38,7 +43,7 @@ class _Prefetch:
         next_video = fetch_next(url, played_ids, channel)
         self._box["result"] = next_video
         if next_video and not session.closed:
-            session.set_next_hint(f"{next_video['title']} · {next_video['channel']}")
+            session.set_next_hint(_hint(next_video))
 
     @property
     def done(self) -> bool:
@@ -121,7 +126,7 @@ def _run(query: str):
 
 
 def _play_session(video: dict) -> None:
-    """영상 하나로 시작해 자동재생/n 키로 이어지는 체인을 mpv 프로세스 하나에서 돌린다."""
+    """영상 하나로 시작해 자동재생/n/p로 앞뒤를 오가는 체인을 mpv 프로세스 하나에서 돌린다."""
     state = history.load_state()
     # 하루에 한 번은 기억한 전략을 버리고 player의 기본 순서로 다시 탐색한다. YouTube가
     # IP 차단을 풀었을 때 느리고 쿠키까지 쓰는 경로에 영구히 머무르지 않기 위한 것이다.
@@ -133,6 +138,15 @@ def _play_session(video: dict) -> None:
     strategy = state["strategy"] if state["probed"] == today else None
     session = PlayerSession(volume=state["volume"], autoplay=state["autoplay"],
                             tty=sys.stdin.isatty(), strategy=strategy)
+    # 지나온 곡을 그대로 들고 있는 재생목록. n/자동재생은 index를 올리고 p는 내린다.
+    # 뒤로 갔다 다시 앞으로 와도 같은 곡으로 돌아오도록 자르지 않고 append만 한다.
+    chain: list[dict] = [video]
+    index = 0
+    # 체인 끝에서 돌린 다음 곡 조회. p로 지나쳤다가 n으로 돌아와도 다시 조회하지 않는다.
+    prefetches: dict[int, _Prefetch] = {}
+    # 이 세션에서 한 번이라도 재생한 체인 위치. 되감아 돌아온 곡에 이어보기를 다시
+    # 적용하지 않기 위한 것이다 — 방금 듣다 넘긴 지점으로 되돌리면 "이전 곡"이 아니다.
+    seen: set[int] = set()
     played_ids: set = set()
     # 재생 중에는 대체 화면 안이라 print가 나갈 때 사라진다. 종료 사유는 여기 모았다가
     # session.quit()으로 화면을 나온 뒤에 찍는다.
@@ -146,16 +160,35 @@ def _play_session(video: dict) -> None:
             notes.append(f"mpv를 시작할 수 없습니다: {e}")
         else:
             while True:
+                video = chain[index]
                 video_id = extract_video_id(video["url"])
                 played_ids.add(video_id)
                 history.record_start(video)
                 session.on_position(
                     lambda seconds, _id=video_id: history.record_position(_id, seconds))
+                session.has_prev = index > 0
                 session.set_next_hint(None)
                 session.set_track(video["title"], video.get("channel"), video.get("duration"))
-                prefetch = _Prefetch(video["url"], played_ids, video.get("channel"), session)
 
-                start = history.resume_position(video_id, video.get("duration") or 0)
+                prefetch = None
+                if index + 1 < len(chain):
+                    # 되감아 돌아온 자리다. 다음 곡을 이미 아니까 조회 없이 힌트만 세운다.
+                    session.set_next_hint(_hint(chain[index + 1]))
+                else:
+                    prefetch = prefetches.get(index)
+                    if prefetch is None:
+                        prefetch = _Prefetch(video["url"], played_ids,
+                                             video.get("channel"), session)
+                        prefetches[index] = prefetch
+                    elif prefetch.done and prefetch.result() is not None:
+                        # 이미 끝난 조회를 재사용하는 경우 _Prefetch가 힌트를 다시
+                        # 올려주지 않으므로 여기서 세운다.
+                        session.set_next_hint(_hint(prefetch.result()))
+
+                first_play = index not in seen
+                seen.add(index)
+                start = history.resume_position(
+                    video_id, video.get("duration") or 0) if first_play else None
                 notice = "스트림 연결 중..."
                 if start:
                     notice = f"⏩ {format_duration(start)}부터 이어서 · {notice}"
@@ -176,9 +209,16 @@ def _play_session(video: dict) -> None:
                     break
                 if reason == "quit":
                     break
+                if reason == "prev":
+                    # player가 has_prev로 막으므로 index가 0 아래로 내려갈 일은 없다.
+                    index -= 1
+                    continue
                 if reason == "eof" and not session.autoplay:
                     break
 
+                if index + 1 < len(chain):
+                    index += 1
+                    continue
                 if not prefetch.done:
                     session.set_notice("다음 영상을 찾는 중...")
                 next_video = prefetch.result()
@@ -186,7 +226,8 @@ def _play_session(video: dict) -> None:
                     notes.append("다음 영상을 찾지 못했습니다.")
                     break
                 # 다음 곡 제목은 카드로 바로 올라가므로 따로 알릴 필요가 없다.
-                video = {**next_video, "duration": 0}
+                chain.append({**next_video, "duration": 0})
+                index += 1
     except KeyboardInterrupt:
         notes.append("재생을 중단합니다.")
     finally:

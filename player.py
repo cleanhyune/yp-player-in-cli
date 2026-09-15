@@ -95,6 +95,9 @@ class PlayerSession:
                  strategy: str | None = None):
         self.volume = volume
         self.autoplay = autoplay
+        # 돌아갈 이전 곡이 있는지. 재생목록은 yp가 쥐고 있으므로 player는 이 불리언
+        # 하나만 본다. 매 load() 전에 yp가 세운다.
+        self.has_prev = False
         # 지난 세션에서 실제로 스트림을 연 시도의 player_client. load()가 갱신하고
         # yp가 state.json에 넣는다.
         self.strategy = strategy
@@ -123,6 +126,7 @@ class PlayerSession:
         self._notice: str | None = None
         self._modal: Pager | LinePrompt | None = None
         self._next_requested = False
+        self._prev_requested = False
         self._quit_requested = False
         self._position_cb: Callable[[float], None] | None = None
         self._last_position_cb = 0.0
@@ -212,6 +216,7 @@ class PlayerSession:
         assert self._client is not None
         self._url = url
         self._next_requested = False
+        self._prev_requested = False
         self.position = 0.0
         # duration도 비운다. 안 비우면 다음 영상이 로드에 실패했을 때 이전 영상의
         # 길이가 남아 그 값이 새 영상의 기록에 잘못 들어간다.
@@ -267,7 +272,13 @@ class PlayerSession:
                 if reason == "quit":
                     return "quit"
                 if reason == "stop":
-                    return "next" if self._next_requested else "quit"
+                    # mpv는 왜 멈췄는지 말해주지 않는다. 직전에 어떤 키가 눌렸는지로
+                    # 의미를 정한다.
+                    if self._next_requested:
+                        return "next"
+                    if self._prev_requested:
+                        return "prev"
+                    return "quit"
                 continue  # redirect / unknown 은 무시
             if kind == "property-change":
                 self._on_property(ev.get("name"), ev.get("data"))
@@ -374,6 +385,14 @@ class PlayerSession:
             self._send("quit", timeout=1.0)
         elif key == "n":
             self._next_requested = True
+            self._send("stop")
+        elif key == "p":
+            # mpv의 기본 p는 일시정지다. 돌아갈 곳이 없어도 mpv로 넘기지 않고
+            # 삼켜야 "이전"을 누른 사용자에게 엉뚱하게 재생이 멈추지 않는다.
+            if not self.has_prev:
+                self._flash("이전 곡이 없습니다")
+                return
+            self._prev_requested = True
             self._send("stop")
         elif key == "a":
             self.autoplay = not self.autoplay
