@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Callable
 
-from comments import PAGE_SIZE, SORT_LABELS, CommentFeed, format_comments, next_sort
+from comments import SORT_LABELS, CommentFeed, ReplyFeed, format_comment, format_header, next_sort
 from mpv_ipc import MpvClient, MpvError
 from tui import (KeyReader, LinePrompt, Pager, Screen, comments_height, enter_alt_screen,
                  exit_alt_screen, hide_cursor, parse_timecode, render_comments,
@@ -38,7 +38,16 @@ _OBSERVED = ("time-pos", "pause", "volume", "duration", "media-title")
 _POSITION_INTERVAL = 10.0
 _REDRAW_INTERVAL = 0.5
 _MESSAGE_SECONDS = 3.0
-_COMMENT_HINT = "j/k 스크롤 · space 페이지 · s 정렬 · q 닫기"
+_COMMENT_HINT = "j/k 이동 · Enter 답글 · s 정렬 · q 닫기"
+_REPLY_HINT = "j/k 이동 · q 되돌아가기"
+# 페이저를 채우는 이벤트와 그 실패 문구. 모두 generation과 pager identity 검사를 거친다.
+_PAGER_FILL_EVENTS = ("comments-more", "comments-reload", "replies-ready", "replies-more")
+_PAGER_FAILURES = {
+    "comments-more-failed": "댓글을 더 불러오지 못했습니다",
+    "comments-reload-failed": "정렬을 바꾸지 못했습니다",
+    "replies-failed": "답글을 불러오지 못했습니다",
+    "replies-more-failed": "답글을 더 불러오지 못했습니다",
+}
 
 
 class PlayerError(Exception):
@@ -134,6 +143,9 @@ class PlayerSession:
         self._comments_thread: threading.Thread | None = None
         self._comments_generation = 0
         self._feed: CommentFeed | None = None
+        # 답글을 보는 동안 루트 페이저를 보관한다 (스크롤·커서 보존). None이면 루트 화면.
+        self._parent_pager: Pager | None = None
+        self._reply_feed: ReplyFeed | None = None
         self._screen = Screen(sys.stdout)
         self._in_screen = False
         self._load_generation = 0
@@ -248,6 +260,8 @@ class PlayerSession:
             # 화면에서 나가지는 않는다. 자동재생 체인 전체가 한 화면 세션이라
             # 곡이 넘어갈 때 깜빡이지 않는다. 이탈은 quit()이 책임진다.
             self._modal = None
+            self._parent_pager = None
+            self._reply_feed = None
         return reason
 
     def _wait_end(self, show_errors: bool) -> str:
@@ -291,27 +305,19 @@ class PlayerSession:
             elif kind == "comments-ready":
                 if ev.get("generation") != self._load_generation:
                     continue  # 이전 영상의 댓글 — 버린다 (큐를 비우면 mpv-exited를 잃는다)
-                self._open_pager(ev["lines"], more=bool(ev.get("more")))
+                self._open_pager(ev)
             elif kind == "comments-failed":
                 if ev.get("generation") != self._load_generation:
                     continue
                 self._flash("댓글을 불러올 수 없습니다")
-            elif kind == "comments-more":
-                if ev.get("generation") != self._load_generation:
+            elif kind in _PAGER_FILL_EVENTS:
+                if not self._event_for_current_pager(ev):
                     continue
-                self._append_comments(ev)
-            elif kind == "comments-more-failed":
-                if ev.get("generation") != self._load_generation:
+                self._fill_pager(ev, replace=kind == "comments-reload")
+            elif kind in _PAGER_FAILURES:
+                if not self._event_for_current_pager(ev):
                     continue
-                self._show_pager_status("댓글을 더 불러오지 못했습니다", more=False)
-            elif kind == "comments-reload":
-                if ev.get("generation") != self._load_generation:
-                    continue
-                self._replace_comments(ev)
-            elif kind == "comments-reload-failed":
-                if ev.get("generation") != self._load_generation:
-                    continue
-                self._show_pager_status("정렬을 바꾸지 못했습니다", more=False)
+                self._show_pager_status(_PAGER_FAILURES[kind], more=False)
             elif kind == "redraw":
                 self._redraw(force=True)
                 continue
@@ -417,17 +423,23 @@ class PlayerSession:
         if isinstance(modal, Pager):
             _, rows = terminal_size()
             height = comments_height(rows)
-            if key == "s" and modal.status is None and self._feed is not None:
-                self._switch_comment_sort()
+            in_replies = self._parent_pager is not None
+            if key == "s":
+                if not in_replies and modal.status is None and self._feed is not None:
+                    self._switch_comment_sort()
                 return
-            if modal.handle_key(key, height):
-                # 페이저를 닫아도 화면에는 남아 있는다 — 카드 화면으로 돌아갈 뿐이다.
-                self._modal = None
-                self._redraw(force=True)
+            action = modal.handle_key(key, height)
+            if action == "close":
+                self._close_pager()
                 return
-            if modal.more and modal.status is None and self._feed is not None \
-                    and modal.at_bottom(height):
-                self._request_more_comments()
+            if action == "open":
+                payload = modal.selected_payload() or {}
+                if not in_replies and modal.status is None and payload.get("reply_token"):
+                    self._open_replies(payload, modal.cursor + 1)
+                return
+            feed = self._reply_feed if in_replies else self._feed
+            if modal.more and modal.status is None and feed is not None and modal.at_last_item():
+                self._request_more(in_replies)
                 return
             self._redraw(force=True)
             return
@@ -456,63 +468,90 @@ class PlayerSession:
             return
         self._feed = CommentFeed(self._url)
         self._flash("댓글 불러오는 중...")
-        self._fetch_comment_page("comments-ready", "comments-failed")
+        self._fetch_page(self._feed, None, "comments-ready", "comments-failed")
 
-    def _request_more_comments(self) -> None:
-        """페이저 바닥에 닿았을 때 다음 페이지를 요청한다. status가 중복 요청을 막는다."""
-        self._show_pager_status(f"다음 {PAGE_SIZE}개 불러오는 중...")
-        self._fetch_comment_page("comments-more", "comments-more-failed")
+    def _request_more(self, in_replies: bool) -> None:
+        """커서가 마지막 블록에 닿았을 때 다음 페이지를 요청한다. status가 중복 요청을 막는다."""
+        pager = self._modal
+        if in_replies:
+            self._show_pager_status("다음 답글 불러오는 중...")
+            self._fetch_page(self._reply_feed, pager, "replies-more", "replies-more-failed", reply=True)
+        else:
+            self._show_pager_status("다음 댓글 불러오는 중...")
+            self._fetch_page(self._feed, pager, "comments-more", "comments-more-failed")
 
     def _switch_comment_sort(self) -> None:
-        """정렬을 토글한다. 정렬이 바뀌면 순서가 통째로 달라지므로 목록을 처음부터 다시 만든다."""
+        """정렬을 토글한다. 순서가 통째로 달라지므로 목록을 처음부터 다시 만든다.
+        이미 배운 정렬 토큰을 넘겨 watch 페이지를 다시 받지 않는다."""
         assert self._feed is not None
         sort = next_sort(self._feed.sort)
-        self._feed = CommentFeed(self._url, sort=sort)
+        self._feed = CommentFeed(self._url, sort=sort, sort_tokens=self._feed.sort_tokens)
         self._show_pager_status(f"{SORT_LABELS[sort]}으로 다시 불러오는 중...")
-        self._fetch_comment_page("comments-reload", "comments-reload-failed")
+        self._fetch_page(self._feed, self._modal, "comments-reload", "comments-reload-failed")
 
-    def _fetch_comment_page(self, ok_event: str, fail_event: str) -> None:
-        assert self._client is not None and self._feed is not None
-        feed, title, events = self._feed, self.title or self._url, self._client.events
-        gen = self._load_generation
+    def _open_replies(self, payload: dict, index: int) -> None:
+        """루트 페이저를 보관하고 답글 페이저를 그 위에 올린다. 첫 페이지는 비동기로 채워진다."""
+        pager = Pager(header=format_comment(payload, index) + ["─" * 44], hint=_REPLY_HINT)
+        pager.status = "답글 불러오는 중..."
+        self._parent_pager, self._modal = self._modal, pager
+        self._reply_feed = ReplyFeed(payload["reply_token"])
+        self._fetch_page(self._reply_feed, pager, "replies-ready", "replies-failed", reply=True)
+        self._redraw(force=True)
+
+    def _close_pager(self) -> None:
+        """답글 화면이면 루트 페이저로, 루트면 카드로. 화면에는 남아 있는다 — 그림만 바뀐다."""
+        if self._parent_pager is not None:
+            self._modal, self._parent_pager, self._reply_feed = self._parent_pager, None, None
+        else:
+            self._modal = None
+        self._redraw(force=True)
+
+    def _fetch_page(self, feed, pager: Pager | None, ok_event: str, fail_event: str,
+                    reply: bool = False) -> None:
+        """feed의 다음 페이지를 워커 스레드에서 받아 블록으로 만들어 이벤트 큐에 넣는다.
+
+        pager는 응답이 돌아갈 페이저다 (첫 루트 페이지는 아직 없어 None). 수신 측이
+        `self._modal is ev["pager"]`로 확인해 닫힌 페이저로 온 응답을 버린다.
+        """
+        assert self._client is not None and feed is not None
+        title, events, gen = self.title or self._url, self._client.events, self._load_generation
+        first_root = not reply and feed.shown == 0
 
         def worker():
             try:
                 start = feed.shown + 1
                 comments, more = feed.next_page()
-                if start > 1:
-                    lines = format_comments(comments, start_index=start)
-                elif comments:
-                    note = f"{SORT_LABELS[feed.sort]}  ·  s 키로 {SORT_LABELS[next_sort(feed.sort)]}"
-                    lines = format_comments(comments, title, note=note)
-                else:
-                    lines = [title, "", "댓글이 없습니다."]
-                events.put({"event": ok_event, "lines": lines, "more": more, "generation": gen})
+                blocks = [format_comment(c, i, reply=reply) for i, c in enumerate(comments, start)]
+                ev = {"event": ok_event, "blocks": blocks, "payloads": comments, "more": more,
+                      "generation": gen, "pager": pager}
+                if first_root:
+                    if comments:
+                        note = f"{SORT_LABELS[feed.sort]}  ·  s 키로 {SORT_LABELS[next_sort(feed.sort)]}"
+                        ev["header"] = format_header(title, note)
+                    else:
+                        ev["header"] = [title, "", "댓글이 없습니다."]
+                events.put(ev)
             except Exception:
-                events.put({"event": fail_event, "generation": gen})
+                events.put({"event": fail_event, "generation": gen, "pager": pager})
 
         self._comments_generation = gen
         self._comments_thread = threading.Thread(target=worker, daemon=True)
         self._comments_thread.start()
 
-    def _append_comments(self, ev: dict) -> None:
-        pager = self._modal
-        if not isinstance(pager, Pager):
-            return  # 응답이 오기 전에 페이저를 닫았다
-        pager.status = None
-        pager.more = bool(ev.get("more"))
-        pager.append(ev.get("lines") or [])
-        self._redraw(force=True)
+    def _event_for_current_pager(self, ev: dict) -> bool:
+        return ev.get("generation") == self._load_generation and ev.get("pager") is self._modal
 
-    def _replace_comments(self, ev: dict) -> None:
-        """정렬을 바꿔 다시 불러온 목록으로 페이저 내용을 갈아끼운다."""
+    def _fill_pager(self, ev: dict, replace: bool) -> None:
         pager = self._modal
         if not isinstance(pager, Pager):
             return
-        pager.lines = ev.get("lines") or []
-        pager.top = 0
-        pager.more = bool(ev.get("more"))
+        blocks, payloads = ev.get("blocks") or [], ev.get("payloads") or []
+        if replace:
+            pager.replace_items(ev.get("header") or pager.header, blocks, payloads)
+        else:
+            pager.add_items(blocks, payloads)
         pager.status = None
+        pager.more = bool(ev.get("more"))
         self._redraw(force=True)
 
     def _show_pager_status(self, text: str, more: bool | None = None) -> None:
@@ -524,11 +563,13 @@ class PlayerSession:
             pager.more = more
         self._redraw(force=True)
 
-    def _open_pager(self, lines: list[str], more: bool = False) -> None:
+    def _open_pager(self, ev: dict) -> None:
         if not self._tty:
             return
         # 이미 대체 화면 안이므로 enter_alt_screen을 다시 부르지 않는다.
-        self._modal = Pager(lines, more=more, hint=_COMMENT_HINT)
+        pager = Pager(header=ev.get("header") or [], more=bool(ev.get("more")), hint=_COMMENT_HINT)
+        pager.add_items(ev.get("blocks") or [], ev.get("payloads") or [])
+        self._modal = pager
         self._redraw(force=True)
 
     # ----- screen -----
