@@ -8,13 +8,15 @@ warnings.filterwarnings("ignore")
 import questionary
 
 import history
-from player import PlayerError, PlayerSession, check_mpv
+from channel import ChannelQueue, resolve_channel
+from player import PlayerError, PlayerSession, check_mpv, resolve_stream
 from related import extract_video_id, fetch_next
 from searcher import search
 from selector import (NEW_SEARCH, NEXT_PAGE, PREV_PAGE, format_duration,
                       select_recent, select_video)
 
 MAX_PAGES = 3
+CHANNEL_MAX_PAGES = 30   # 선택기 페이지(10개) 기준. 채널 목록은 필요할 때 30개씩 더 받는다
 
 
 def _hint(video: dict) -> str:
@@ -27,23 +29,32 @@ def _today() -> str:
 
 
 class _Prefetch:
-    """현재 영상이 재생되는 동안 다음 자동재생 후보를 백그라운드에서 찾아둔다.
+    """현재 영상이 재생되는 동안 다음 곡을 찾고(find_next, 기본은 사이드바) 스트림 URL까지 풀어둔다.
 
     played_ids는 메인 루프가 계속 바꾸므로 set()으로 스냅샷을 떠서 넘긴다. 결과가
     나오면 세션 상태줄에 힌트를 올리는데, 세션이 이미 닫혔으면 버린다.
     """
 
-    def __init__(self, url: str, played_ids: set, channel: str | None, session: PlayerSession):
+    def __init__(self, url: str, played_ids: set, channel: str | None, session: PlayerSession,
+                 find_next=None):
         self._box: dict = {}
-        self._thread = threading.Thread(
-            target=self._run, args=(url, set(played_ids), channel, session), daemon=True)
+        ids = set(played_ids)
+        find_next = find_next or (lambda: fetch_next(url, ids, channel))
+        self._thread = threading.Thread(target=self._run, args=(find_next, session), daemon=True)
         self._thread.start()
 
-    def _run(self, url, played_ids, channel, session):
-        next_video = fetch_next(url, played_ids, channel)
-        self._box["result"] = next_video
-        if next_video and not session.closed:
+    def _run(self, find_next, session):
+        next_video = find_next()
+        if next_video is None:
+            self._box["result"] = None
+            return
+        # 힌트는 스트림을 푸는 1~2초를 기다리지 않고 곡을 찾은 즉시 올린다.
+        if not session.closed:
             session.set_next_hint(_hint(next_video))
+        # 직접 URL을 미리 풀어 곡 전환의 ytdl_hook(~1.9초)을 없앤다. None이면 load()가 예전 경로로 간다.
+        stream = resolve_stream(next_video["url"], session.strategy)
+        self._box["result"] = {**next_video, "stream": stream,
+                               "duration": stream.duration if stream else 0}
 
     @property
     def done(self) -> bool:
@@ -68,6 +79,8 @@ def main():
         args = sys.argv[1:]
         if not args or args in (["-r"], ["--recent"]):
             _run_recent()
+        elif args[0] in ("-c", "--channel") and len(args) > 1:
+            _run_channel(" ".join(args[1:]))
         else:
             _run(" ".join(args))
     except KeyboardInterrupt:
@@ -90,6 +103,37 @@ def _run_recent():
     _play_session(video)
     print()
     _run(_ask("다음 검색어 (엔터로 종료):"))
+
+
+def _run_channel(query: str):
+    """채널의 최신 업로드를 고르고, 자동재생은 사이드바 대신 그 목록 순서(최신 → 과거)를 따른다."""
+    print(f"\n'{query}' 채널 찾는 중...")
+    channel = resolve_channel(query)
+    if channel is None:
+        print("채널을 찾지 못했습니다.")
+        return
+    handle = f" ({channel['handle']})" if channel.get("handle") else ""
+    print(f"채널: {channel['name']}{handle}")
+    queue = ChannelQueue(channel)
+    page = 1
+    while True:
+        # 다음 페이지 ▶ 버튼이 나오려면 다음 선택기 페이지 첫 항목까지 받아둬야 한다.
+        queue.ensure(page * 10 + 1)
+        if not queue.videos:
+            print("채널에 영상이 없습니다.")
+            return
+        result = select_video(queue.videos, page=page, max_pages=CHANNEL_MAX_PAGES,
+                              message=f"채널 '{channel['name']}' 최신 영상:")
+        if result == NEXT_PAGE:
+            page = min(page + 1, CHANNEL_MAX_PAGES)
+        elif result == PREV_PAGE:
+            page = max(page - 1, 1)
+        elif result is None:
+            return
+        else:
+            video = next(v for v in queue.videos if v["url"] == result)
+            _play_session(video, find_next=queue.next_after, end_note="채널 영상을 모두 들었습니다.")
+            print()
 
 
 def _run(query: str):
@@ -125,8 +169,10 @@ def _run(query: str):
                 break
 
 
-def _play_session(video: dict) -> None:
-    """영상 하나로 시작해 자동재생/n/p로 앞뒤를 오가는 체인을 mpv 프로세스 하나에서 돌린다."""
+def _play_session(video: dict, find_next=None, end_note: str = "다음 영상을 찾지 못했습니다.") -> None:
+    """영상 하나로 시작해 자동재생/n/p로 앞뒤를 오가는 체인을 mpv 프로세스 하나에서 돌린다.
+
+    find_next(url) -> dict | None이 있으면 다음 곡을 사이드바 대신 그것으로 고른다 (채널 모드)."""
     state = history.load_state()
     # 하루에 한 번은 기억한 전략을 버리고 player의 기본 순서로 다시 탐색한다. YouTube가
     # IP 차단을 풀었을 때 느리고 쿠키까지 쓰는 경로에 영구히 머무르지 않기 위한 것이다.
@@ -177,8 +223,8 @@ def _play_session(video: dict) -> None:
                 else:
                     prefetch = prefetches.get(index)
                     if prefetch is None:
-                        prefetch = _Prefetch(video["url"], played_ids,
-                                             video.get("channel"), session)
+                        prefetch = _Prefetch(video["url"], played_ids, video.get("channel"), session,
+                                             find_next=(lambda url=video["url"]: find_next(url)) if find_next else None)
                         prefetches[index] = prefetch
                     elif prefetch.done and prefetch.result() is not None:
                         # 이미 끝난 조회를 재사용하는 경우 _Prefetch가 힌트를 다시
@@ -193,7 +239,7 @@ def _play_session(video: dict) -> None:
                 if start:
                     notice = f"⏩ {format_duration(start)}부터 이어서 · {notice}"
                 session.set_notice(notice)
-                reason = session.load(video["url"], start=start)
+                reason = session.load(video["url"], start=start, stream=video.get("stream"))
 
                 if session.duration > 0:
                     # 자동재생 항목은 duration 0으로 기록됐다. mpv가 관측한 실제 길이를
@@ -223,10 +269,10 @@ def _play_session(video: dict) -> None:
                     session.set_notice("다음 영상을 찾는 중...")
                 next_video = prefetch.result()
                 if next_video is None:
-                    notes.append("다음 영상을 찾지 못했습니다.")
+                    notes.append(end_note)
                     break
                 # 다음 곡 제목은 카드로 바로 올라가므로 따로 알릴 필요가 없다.
-                chain.append({**next_video, "duration": 0})
+                chain.append({"duration": 0, **next_video})
                 index += 1
     except KeyboardInterrupt:
         notes.append("재생을 중단합니다.")
