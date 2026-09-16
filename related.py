@@ -1,35 +1,12 @@
 from __future__ import annotations
 
-import json
 import re
-import urllib.request
 
-_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-)
-
+from innertube import fetch_initial_data
 
 def extract_video_id(url: str) -> str | None:
     match = re.search(r"[?&]v=([\w-]{11})", url)
     return match.group(1) if match else None
-
-
-def _fetch_initial_data(video_id: str) -> dict:
-    req = urllib.request.Request(
-        f"https://www.youtube.com/watch?v={video_id}",
-        headers={
-            "User-Agent": _USER_AGENT,
-            "Accept-Language": "ko-KR,ko;q=0.9",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        html = resp.read().decode("utf-8", errors="ignore")
-
-    match = re.search(r"var ytInitialData\s*=\s*(\{.*?\});</script>", html)
-    if not match:
-        raise ValueError("ytInitialData not found in watch page")
-    return json.loads(match.group(1))
 
 
 def _iter_sidebar_videos(initial_data: dict):
@@ -73,7 +50,7 @@ def fetch_next(url: str, played_ids: set[str], current_channel: str | None = Non
         return None
 
     try:
-        initial_data = _fetch_initial_data(video_id)
+        initial_data = fetch_initial_data(video_id)
         candidates = []
         for lockup in _iter_sidebar_videos(initial_data):
             content_id = lockup.get("contentId")

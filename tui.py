@@ -276,24 +276,45 @@ def _comments_header(state: dict, cols: int) -> list[str]:
 
 
 def render_comments(state: dict, pager: "Pager", cols: int, rows: int) -> list[str]:
-    """댓글 패널 한 프레임. 위쪽에 곡 제목과 진행바가 남아 시간이 계속 흐르는 게 보인다."""
+    """댓글 패널 한 프레임. 위쪽에 곡 제목과 진행바가 남아 시간이 계속 흐르는 게 보인다.
+
+    선택 블록은 평문으로 자르고 패딩한 뒤 bold를 입히고, 첫 줄의 앞 한 칸을 ▶로 바꾼다.
+    """
     if rows <= 0:
         return []
     height = comments_height(rows)
-    body = [_fit(line, cols) for line in pager.visible(height)]
+    rng = pager.selected_range()
+    body = []
+    for i, line in enumerate(pager.visible(height), pager.top):
+        selected = rng is not None and rng[0] <= i < rng[1]
+        if selected and i == rng[0] and line.startswith(" "):
+            line = "▶" + line[1:]
+        text = _fit(line, cols)
+        body.append(bold(text) if selected else text)
     body += [""] * (height - len(body))
-    last = min(pager.top + height, len(pager.lines))
-    footer = f"-- {pager.top + 1}-{last}/{len(pager.lines)}  {pager.status or pager.hint} --"
+    n = len(pager.anchors)
+    count = f"{pager.cursor + 1}/{n}" if n else "0/0"
+    footer = f"-- {count}{'+' if pager.more else ''}  {pager.status or pager.hint} --"
     lines = _comments_header(state, cols) + [dim("─" * cols)] + body + [dim(_fit(footer, cols))]
     lines = lines[:rows]
     return lines + [""] * (rows - len(lines))
 
 
 class Pager:
-    DEFAULT_HINT = "j/k 스크롤 · space 페이지 · q 닫기"
+    """블록(댓글 한 개) 단위 커서를 가진 줄 페이저. 블록 내용은 모른다.
 
-    def __init__(self, lines: list[str], more: bool = False, hint: str | None = None):
-        self.lines = lines
+    lines는 header + 블록들을 평탄화한 것이고 anchors[i]는 블록 i의 첫 줄 번호다.
+    커서는 항상 화면 안에 있다: j/k는 블록을 따라 화면을 끌고, space/PgDn은 화면을 넘긴 뒤
+    커서를 새 화면의 첫 블록으로 끌어온다.
+    """
+    DEFAULT_HINT = "j/k 이동 · q 닫기"
+
+    def __init__(self, header: list[str] | None = None, more: bool = False, hint: str | None = None):
+        self.header: list[str] = list(header or [])
+        self.lines: list[str] = list(self.header)
+        self.anchors: list[int] = []
+        self.payloads: list = []
+        self.cursor = 0
         self.top = 0
         self.hint = hint or self.DEFAULT_HINT
         # more: 뒤에 더 불러올 페이지가 있을 수 있음. status: 푸터에 띄울 한 줄
@@ -301,34 +322,98 @@ class Pager:
         self.more = more
         self.status: str | None = None
 
+    def add_items(self, blocks: list[list[str]], payloads: list | None = None) -> None:
+        """블록을 뒤에 붙인다. 스크롤과 커서는 그대로."""
+        if payloads is None:
+            payloads = [None] * len(blocks)
+        for block, payload in zip(blocks, payloads):
+            self.anchors.append(len(self.lines))
+            self.payloads.append(payload)
+            self.lines.extend(block)
+
+    def replace_items(self, header: list[str], blocks: list[list[str]],
+                      payloads: list | None = None) -> None:
+        """내용을 통째로 갈아끼운다 (정렬 전환). 커서와 스크롤은 처음으로."""
+        self.header = list(header)
+        self.lines = list(self.header)
+        self.anchors, self.payloads = [], []
+        self.cursor = self.top = 0
+        self.add_items(blocks, payloads)
+
     def visible(self, height: int) -> list[str]:
         return self.lines[self.top:self.top + height]
 
-    def append(self, lines: list[str]) -> None:
-        """스크롤 위치를 유지한 채 뒤에 줄을 이어붙인다."""
-        self.lines.extend(lines)
+    def selected_payload(self):
+        return self.payloads[self.cursor] if self.anchors else None
 
-    def at_bottom(self, height: int) -> bool:
-        return self.top >= max(0, len(self.lines) - height)
+    def selected_range(self) -> tuple[int, int] | None:
+        """선택 블록의 줄 범위 [start, end). 블록이 없으면 None."""
+        if not self.anchors:
+            return None
+        start = self.anchors[self.cursor]
+        end = self.anchors[self.cursor + 1] if self.cursor + 1 < len(self.anchors) else len(self.lines)
+        return start, end
 
-    def handle_key(self, key: str, height: int) -> bool:
-        """키를 처리하고, 페이저를 닫아야 하면 True."""
-        if key in ("q", "ESC"):
-            return True
-        max_top = max(0, len(self.lines) - height)
+    def at_last_item(self) -> bool:
+        return bool(self.anchors) and self.cursor == len(self.anchors) - 1
+
+    def _max_top(self, height: int) -> int:
+        return max(0, len(self.lines) - height)
+
+    def _ensure_visible(self, height: int) -> None:
+        rng = self.selected_range()
+        if rng is None:
+            return
+        start, end = rng
+        if start < self.top:
+            self.top = start
+        elif end > self.top + height:
+            self.top = end - height
+        if end - start > height:
+            self.top = start   # 화면보다 큰 블록은 첫 줄을 맨 위에
+        self.top = max(0, min(self.top, self._max_top(height)))
+
+    def _cursor_to_view(self, height: int) -> None:
+        """첫 줄이 화면에 보이는 첫 블록으로. 없으면(긴 블록 한가운데) 화면 위 마지막 블록."""
+        if not self.anchors:
+            return
+        lo, hi = self.top, self.top + height
+        for i, anchor in enumerate(self.anchors):
+            if lo <= anchor < hi:
+                self.cursor = i
+                return
+        before = [i for i, anchor in enumerate(self.anchors) if anchor < lo]
+        self.cursor = before[-1] if before else 0
+
+    def handle_key(self, key: str, height: int) -> str | None:
+        """키를 처리한다. "close"면 페이저를 닫고, "open"이면 선택 블록을 열라는 뜻."""
+        if key in ("q", "ESC", "LEFT"):
+            return "close"
+        if key == "ENTER":
+            return "open"
+        n = len(self.anchors)
         if key in ("j", "DOWN"):
-            self.top = min(self.top + 1, max_top)
+            if n:
+                self.cursor = min(self.cursor + 1, n - 1)
+                self._ensure_visible(height)
         elif key in ("k", "UP"):
-            self.top = max(self.top - 1, 0)
+            if n:
+                self.cursor = max(self.cursor - 1, 0)
+                self._ensure_visible(height)
         elif key in ("SPACE", "PGDWN", "f"):
-            self.top = min(self.top + height, max_top)
+            self.top = min(self.top + height, self._max_top(height))
+            self._cursor_to_view(height)
         elif key in ("PGUP", "b"):
             self.top = max(self.top - height, 0)
+            self._cursor_to_view(height)
         elif key in ("g", "HOME"):
-            self.top = 0
+            self.top = self.cursor = 0
         elif key in ("G", "END"):
-            self.top = max_top
-        return False
+            if n:
+                self.cursor = n - 1
+            self.top = self._max_top(height)
+            self._ensure_visible(height)
+        return None
 
 
 class LinePrompt:
