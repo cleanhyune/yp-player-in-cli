@@ -23,7 +23,8 @@ def format_duration(seconds: int) -> str:
     return f"{m}:{s:02d}"
 
 
-def select_video(videos: list[dict], page: int = 1, max_pages: int = 3) -> str | None:
+def select_video(videos: list[dict], page: int = 1, max_pages: int = 3,
+                 message: str = "재생할 영상을 선택하세요:") -> str | None:
     start = (page - 1) * PAGE_SIZE
     end = start + PAGE_SIZE
     page_videos = videos[start:end]
@@ -56,7 +57,7 @@ def select_video(videos: list[dict], page: int = 1, max_pages: int = 3) -> str |
         choices.append(item)
 
     chosen = questionary.select(
-        "재생할 영상을 선택하세요:",
+        message,
         choices=choices,
         style=_STYLE,
     ).ask()

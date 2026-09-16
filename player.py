@@ -7,10 +7,14 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from typing import Callable
+
+from yt_dlp import YoutubeDL
 
 from comments import SORT_LABELS, CommentFeed, ReplyFeed, format_comment, format_header, next_sort
 from mpv_ipc import MpvClient, MpvError
+from ytdlp_common import SilentLogger
 from tui import (KeyReader, LinePrompt, Pager, Screen, comments_height, enter_alt_screen,
                  exit_alt_screen, hide_cursor, parse_timecode, render_comments,
                  render_playing, show_cursor, terminal_mode, terminal_size)
@@ -76,6 +80,37 @@ def check_mpv() -> bool:
     return shutil.which("mpv") is not None
 
 
+@dataclass(frozen=True)
+class Stream:
+    """미리 풀어둔 오디오 스트림. url은 googlevideo 직접 주소라 mpv가 ytdl_hook 없이 연다
+    (~0.5초 vs YouTube URL ~1.9초). client는 그 URL을 낸 player_client — 성공 시 strategy로 기억."""
+    url: str
+    client: str
+    duration: float = 0.0
+
+
+def resolve_stream(url: str, strategy: str | None) -> Stream | None:
+    """load()와 같은 _attempt_order를 걷어 직접 URL을 푼다. mpv를 거치지 않아 실패한 시도가
+    곡 사이 공백으로 드러나지 않는다. 어떤 예외도 삼켜 None — 그러면 load()가 예전 경로로 간다."""
+    for client, cookies in _attempt_order(strategy):
+        opts = {
+            "quiet": True, "no_warnings": True, "logger": SilentLogger(),
+            "format": "bestaudio/best",
+            "extractor_args": {"youtube": {"player_client": [client]}},
+        }
+        if cookies:
+            opts["cookiesfrombrowser"] = (_COOKIE_BROWSER,)
+        try:
+            with YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception:
+            continue
+        direct = (info or {}).get("url")
+        if direct:
+            return Stream(url=direct, client=client, duration=float(info.get("duration") or 0.0))
+    return None
+
+
 def _ytdlp_path() -> str:
     """Prefer a standalone Homebrew-managed yt-dlp, which the user keeps up to
     date via `brew upgrade` independently of yp's release cadence -- YouTube
@@ -128,6 +163,8 @@ class PlayerSession:
         self._keys: KeyReader | None = None
         self._term = None
         self._url = ""
+        # 직접 URL 재생 중이면 mpv의 media-title은 'videoplayback' 같은 파일명이라 무시해야 한다.
+        self._direct = False
         self._next_hint: str | None = None
         self._message: str | None = None
         self._message_until = 0.0
@@ -224,7 +261,9 @@ class PlayerSession:
 
     # ----- playback -----
 
-    def load(self, url: str, start: float | None = None) -> str:
+    def load(self, url: str, start: float | None = None, stream: Stream | None = None) -> str:
+        """url을 끝까지 재생하고 끝난 사유를 돌려준다. stream(프리페치가 푼 직접 URL)이 있으면
+        ytdl 없이 그것을 먼저 열고, 만료 등으로 실패하면 ytdl을 켜 YouTube URL 시도 체인으로 간다."""
         assert self._client is not None
         self._url = url
         self._next_requested = False
@@ -238,10 +277,15 @@ class PlayerSession:
         self._load_generation += 1
         reason = "error"
         try:
+            if stream is not None:
+                reason = self._play_direct(stream, start)
+                if reason != "error" or self.closed:
+                    return reason
             attempts = _attempt_order(self.strategy)
             for index, (client, cookies) in enumerate(attempts):
                 is_final = index == len(attempts) - 1
                 try:
+                    self._client.command("set", "ytdl", "yes")
                     self._client.command("set", "ytdl-raw-options",
                                          _raw_options(client, cookies))
                     self._client.command("set", "start", str(int(start)) if start else "none")
@@ -263,6 +307,23 @@ class PlayerSession:
             self._parent_pager = None
             self._reply_feed = None
         return reason
+
+    def _play_direct(self, stream: Stream, start: float | None) -> str:
+        assert self._client is not None
+        self._direct = True
+        try:
+            try:
+                self._client.command("set", "ytdl", "no")
+                self._client.command("set", "start", str(int(start)) if start else "none")
+                self._client.command("loadfile", stream.url)
+            except MpvError:
+                return "error"
+            reason = self._wait_end(show_errors=False)
+            if reason == "eof" or self.duration > 0:
+                self.strategy = stream.client
+            return reason
+        finally:
+            self._direct = False
 
     def _wait_end(self, show_errors: bool) -> str:
         assert self._client is not None
@@ -342,8 +403,8 @@ class PlayerSession:
             if data is not None:
                 self.volume = int(round(float(data)))
         elif name == "media-title":
-            # 빈 값으로 덮어쓰면 set_track이 미리 넣어둔 제목까지 날아간다.
-            if data:
+            # 빈 값이나 직접 URL의 파일명('videoplayback')으로 set_track의 제목을 덮어쓰면 안 된다.
+            if data and not self._direct:
                 self.title = str(data)
 
     def on_position(self, callback: Callable[[float], None]) -> None:
