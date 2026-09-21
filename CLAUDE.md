@@ -16,6 +16,7 @@ related.py    # Next-video lookup by parsing the watch page's related-video side
 channel.py    # -c 채널 모드: 채널 해석(이름/@핸들/URL) + 최신 업로드 30개 단위 페이징 + ChannelQueue(재생 순서)
 innertube.py  # watch 페이지 ytInitialData fetch + youtubei/v1/next POST. related/comments가 공유. yp 지식 없음
 comments.py   # CommentFeed/ReplyFeed: innertube 커서 페이징 + 블록 포맷터 ('t'로 댓글, Enter로 답글)
+debuglog.py   # YP_DEBUG가 켜졌을 때만 삼킨 예외를 ~/.config/yp/debug.log에 남기는 로거. yp 지식 없음
 ```
 
 ## Key Decisions
@@ -26,7 +27,7 @@ comments.py   # CommentFeed/ReplyFeed: innertube 커서 페이징 + 블록 포�
 - **`n`/`p`는 재생목록 위의 이동이지 '다음/이전 추천'이 아니다** — `yp._play_session`이 지나온 곡을 `chain: list[dict]` + `index`로 들고 있고, `n`/자동재생은 index를 올리며(체인 끝일 때만 `_Prefetch`로 다음 곡을 뽑아 append) `p`는 내린다. 체인을 자르지 않기 때문에 `p` 뒤의 `n`은 떠났던 바로 그 곡으로 돌아온다 — 별도 로직이 아니라 자료구조에서 따라온다. 세 가지가 여기 붙어 있다: (1) player는 재생목록을 모르고 `session.has_prev` 불리언만 본다. 첫 곡에서 `p`는 스트림을 끊지 않고 메시지만 띄운다 (같은 곡을 다시 여는 스트림 재해석 2~3초를 아끼고, mpv 기본 `p`=일시정지가 새어나가지 않게 삼킨다). (2) `history.resume_position`은 **세션 안에서 그 자리를 처음 재생할 때만** 적용한다(`seen: set[int]`) — 되감아 돌아왔는데 방금 넘긴 지점으로 되돌리면 "이전 곡"이 아니다. `history`의 기록 자체는 그대로 남아 다음 *실행*의 이어보기는 살아 있다. (3) 체인 끝에서 돈 `_Prefetch`는 `prefetches: dict[index, _Prefetch]`에 남겨 `p`로 지나쳤다 `n`으로 돌아와도 같은 조회를 두 번 하지 않는다 (`_Prefetch`는 완료 시 스스로 힌트를 올리므로, 재사용할 때는 `_hint()`로 직접 세워줘야 한다)
 - **Channel mode replaces the sidebar with the channel's upload order** — `yp -c <이름|@핸들|URL>` resolves the channel in `channel.resolve_channel` (a name goes through `ytsearch5` and takes the most common `channel_id` among the hits; `@handle`/URL reads the channel page with `playlist_items=1:1`), lists uploads via yt-dlp flat extraction of `/channel/<id>/videos` in `PAGE_SIZE=30` chunks (`playlist_items="31:60"` etc., 0.5–1s each), and hands `_play_session` a `find_next=queue.next_after` so autoplay/`n` walk **down the list (newest → oldest)** instead of the related-video sidebar; when the channel runs out the session ends with "채널 영상을 모두 들었습니다." `_Prefetch(url, played_ids, channel, session, find_next=None)` is the only seam: the default `find_next` is the old `fetch_next` sidebar lookup, and the stream pre-resolution (stage 2) applies to both modes unchanged. `ChannelQueue.ensure(n)` fetches pages lazily; `_run_channel` keeps one selector page ahead (`ensure(page*10+1)`) so `select_video`'s "다음 페이지 ▶" button appears, and a fetch failure marks the channel exhausted rather than raising. After a session ends, channel mode returns to the same list, not the search prompt
 - **Autoplay prefetch resolves the stream too, so track changes skip ytdl_hook** — `yp._Prefetch` has two stages: `fetch_next` (sidebar lookup, hint goes up immediately) and then `player.resolve_stream(url, session.strategy)`, which walks the same `_attempt_order` chain through the yt-dlp Python API (`bestaudio/best`, `cookiesfrombrowser=chrome` on the cookie step) and returns a `Stream(url, client, duration)` with the direct googlevideo URL. `PlayerSession.load(url, start, stream)` then does `set ytdl no` + `loadfile stream.url` first — mpv opens a direct URL in ~0.5s versus ~1.9s for a YouTube URL through ytdl_hook, and end-to-end (`n` pressed → next track audible, pty-driven A/B, 3 trials each) the gap went 1.9–2.6s → 0.7–1.1s (2026-09 measured), and when YouTube is blocking, the ~5.7s-per-attempt retries happen in the background during the previous track instead of in the gap. If the direct URL fails (`end-file reason=error`, e.g. expired after ~6h or a stale `p` revisit), `load()` sets `ytdl yes` back and falls through to the old YouTube-URL chain, so nothing is lost. Success records `stream.client` as `strategy`. Two details: `resolve_stream` swallows every exception (a `None` stream just means the old path), and while a direct URL plays, `_direct` makes `_on_property` ignore `media-title` — mpv reports the file name `videoplayback` there, which would clobber the title `set_track` put on the card. The first track of a session has no prefetch and still goes through ytdl_hook; true 0s gaps would need mpv-side playlist prefetch and are out of scope
-- **One mpv per playback session, Python owns the terminal** — `PlayerSession.start()` launches `mpv --no-video --no-terminal --idle=yes --input-ipc-server=/tmp/yp_mpv_socket` once; each video is a `loadfile` over IPC, so autoplay/`n` transitions have no process restart and volume/pause state survives. Because mpv has no terminal, `tui.KeyReader` reads stdin in cbreak mode (not raw — Ctrl+C must still raise `KeyboardInterrupt`) and forwards unknown keys to mpv via the `keypress` IPC command, so mpv's default bindings (space, arrows, 9/0, m) keep working. Intercepted keys: `q` quit, `n` next, `p` prev, `a` autoplay toggle, `g` timecode prompt, `t` comments pager (and inside the pager, `s` toggles comment sort).
+- **One mpv per playback session, Python owns the terminal** — `PlayerSession.start()` launches `mpv --no-video --no-terminal --idle=yes --input-ipc-server=<tmp>/yp_mpv_<pid>.sock` once (per-process path — a fixed path let a second `yp` unlink the first one's socket; `quit()` removes it); each video is a `loadfile` over IPC, so autoplay/`n` transitions have no process restart and volume/pause state survives. Because mpv has no terminal, `tui.KeyReader` reads stdin in cbreak mode (not raw — Ctrl+C must still raise `KeyboardInterrupt`) and forwards unknown keys to mpv via the `keypress` IPC command, so mpv's default bindings (space, arrows, 9/0, m) keep working. Intercepted keys: `q` quit, `n` next, `p` prev, `a` autoplay toggle, `g` timecode prompt, `t` comments pager (and inside the pager, `s` toggles comment sort).
   Python이 재생 중 터미널 전체를 소유한다: `start()`에서 대체 화면(alt screen)에 들어가
   `quit()`에서 나오므로 자동재생 체인 전체가 한 화면 세션이고 곡 전환에 깜빡임이 없다.
   `tui.render_playing()` / `render_comments()`가 화면 한 프레임을 `list[str]`로 만드는
@@ -52,6 +53,8 @@ comments.py   # CommentFeed/ReplyFeed: innertube 커서 페이징 + 블록 포�
 - **Single event queue** — `MpvClient.events` receives mpv events, key events from `KeyReader`, `comments-ready/-failed`, `comments-more/-failed`, `comments-reload/-failed`, `replies-ready/-failed` and `replies-more/-failed` from the comments thread, and `redraw` from the prefetch thread. `PlayerSession.load()` consumes only this queue. This is what makes "`end-file reason=stop` right after `n` means `next`, otherwise `quit`" a safe interpretation
 - **Per-file options via `set` before `loadfile`** — the attempt chain and resume position are applied with `set ytdl-raw-options ...` / `set start <sec>|none` immediately before each `loadfile`, not as `loadfile` positional options (whose positional layout changed in mpv 0.38)
 - **The attempt chain ends in a cookie attempt; the winner is remembered but re-probed daily** — `_ATTEMPTS` is `(android, no cookies)` → `(web_embedded, no cookies)` → `(web_safari, cookies-from-browser=chrome)`, and `load()` retries the next entry whenever `end-file reason=error` comes back. The last entry exists because YouTube now demands bot attestation on the player endpoint per-IP: when that kicks in, **every** anonymous request dies with `Sign in to confirm you're not a bot` regardless of yt-dlp version or client (2026-09: verified across 2025.10.14 / 2026.06.09 / 2026.07.04 / 2026.08.19 × 8 clients — all identical), and only cookies get through. Cookies narrow the usable clients, though: `android`/`ios` then fail with `No video formats found!` and `tv` with `The page needs to be reloaded`, so only the web family works — `web_safari` was fastest (7.3s vs web_embedded 8.1s / mweb 8.6s / web 9.7s). Note there is deliberately **no error-string matching** for the bot message: the existing retry-on-error loop already covers it and won't rot when yt-dlp rewords the error
+- **Cookie use is opt-in, asked once** — `state.json` carries `cookies: bool | None`. `None` means never asked: `yp._play_session` asks `_ask_cookies()` (questionary confirm, default No) right after the user picks a track, which is the last point before the alt screen, and saves the answer with the rest of the state; without a tty it silently picks `False`. `PlayerSession(cookies=...)` and `resolve_stream(url, strategy, cookies)` both go through `_attempt_order(preferred, cookies)`, which drops the `web_safari`+cookies entry when declined — so a remembered `strategy="web_safari"` degrades to the default anonymous order instead of re-attaching cookies. Editing `cookies` in `state.json` (or deleting the key) is the only way to change the answer later
+- **Swallowed exceptions are logged, never printed** — `related.fetch_next`, `player.resolve_stream`, the comments worker and `channel` catch everything by design (a broken parse must never reach the playback loop), which makes a YouTube JSON reshape look like "autoplay just stopped". `debuglog.get(name)` gives each module a `yp.<name>` logger and every such `except` calls `_log.debug(..., exc_info=True)`. `debuglog.setup()` in `main()` reads `YP_DEBUG`: unset/`0` attaches a `NullHandler`, `1` writes to `~/.config/yp/debug.log`, any other value is used as the path. It is a file and not stderr because the terminal is in the alt screen while playing
 - **Who owns what in that chain** — `PlayerSession.strategy` holds the `player_client` that last actually opened a stream, and `_attempt_order()` rotates it to the front. The signal for "this attempt worked" is `reason == "eof" or self.duration > 0` — duration arriving is the only proof the stream opened, so pressing `q` mid-resolution isn't recorded as a success. `player.py` knows nothing about clocks: **`yp._play_session` owns the re-probe policy**, discarding the remembered strategy when `state["probed"] != _today()` so that once a day the chain runs from the top again. Without that, a session that got blocked once would sit on the slower cookie path forever even after YouTube unblocked the IP — and keep attaching the user's account cookies (watch-history side effect) for no reason. The probe is placed at `PlayerSession` construction, i.e. right after the user picks a track and is already waiting for a stream, never mid-autoplay-chain. Cost of a wasted probe while still blocked: **~5.7s** end-to-end through mpv (2026-09 measured: 13.3s resolve for the full chain vs 7.6s straight to `web_safari`; raw yt-dlp failures are only 1.3s + 2.1s, the rest is mpv respawning ytdl_hook per attempt). When *not* blocked the probe costs nothing, since `android` succeeds on the first try. `strategy`/`probed` live in `state.json`; deleting them forces an immediate re-probe
 - **No more /tmp state files or Lua** — volume and autoplay persist in `~/.config/yp/state.json`; playback history and resume positions in `history.json` (atomic write via `os.replace`). Resume applies when the saved position is ≥30s and <95% of duration. `time-pos` `null` at end-of-file is ignored so the last real position isn't wiped before it's recorded
 - **mpv errors surface via IPC** — `request_log_messages error`; log lines are printed only on the final fallback attempt (same effect as the old per-attempt `--msg-level`)
@@ -72,6 +75,9 @@ python3.11 yp.py "검색어"
 # Test
 python3.11 -m pytest tests/ -v
 
+# 삼킨 예외 보기 (자동재생이 이유 없이 끊길 때)
+YP_DEBUG=1 python3.11 yp.py "검색어"   # → ~/.config/yp/debug.log
+
 # Install dependencies
 python3.11 -m pip install yt-dlp questionary pytest
 brew install mpv
@@ -84,13 +90,13 @@ search(query) -> [{"title", "channel", "url", "duration"}, ...]  # 30개 한번�
 select_video(videos, page, max_pages, message=...) -> url | NEXT_PAGE | PREV_PAGE | None
 select_recent(items) -> url | NEW_SEARCH | None
 
-session = PlayerSession(volume, autoplay, tty, strategy); session.start()   # 대체 화면 진입
+session = PlayerSession(volume, autoplay, tty, strategy, cookies); session.start()   # 대체 화면 진입. cookies=False면 쿠키 시도를 뺀다
 session.set_track(title, channel, duration)   # 카드에 미리 올릴 메타데이터 (mpv의 media-title은 늦게 온다)
 session.set_notice(text | None)               # 안내 슬롯. time-pos가 올 때마다 지워진다(첫 번째만이 아님). 메인 스레드 전용
 session.has_prev = bool                       # 돌아갈 이전 곡이 있는지. 매 load() 전에 yp가 세운다
 session.load(url, start, stream=None) -> "eof" | "quit" | "next" | "prev" | "error"   # blocks until the file ends
                 # stream: 프리페치가 푼 Stream(url, client, duration). 있으면 ytdl 없이 직접 URL을 먼저 연다
-resolve_stream(url, strategy) -> Stream | None  # yt-dlp Python API로 시도 체인을 걸어 직접 URL을 푼다. 예외는 삼킨다
+resolve_stream(url, strategy, cookies=True) -> Stream | None  # yt-dlp Python API로 시도 체인을 걸어 직접 URL을 푼다. 예외는 삼킨다(YP_DEBUG면 기록)
 session.autoplay / session.volume / session.position           # read after load()
 session.strategy                                               # 실제로 스트림을 연 player_client
 session.errors                                # 버퍼된 mpv 오류. quit() 뒤에 출력할 것
@@ -119,10 +125,13 @@ format_comment(c, index, reply=False) -> [줄]  # 블록 한 개. reply=True면 
 pager = Pager(header, more, hint); pager.add_items(blocks, payloads); pager.replace_items(header, blocks, payloads)
 pager.handle_key(key, height) -> "close" | "open" | None;  pager.selected_payload();  pager.at_last_item()
 history.record_start / record_position / clear_position / resume_position / recent
-history.load_state() -> {"volume", "autoplay", "strategy", "probed"}
+history.load_state() -> {"volume", "autoplay", "strategy", "probed", "cookies"}
                 # strategy = 지난번 스트림을 연 player_client | None
                 # probed   = strategy를 마지막으로 재탐색한 날짜(ISO) | None. 오늘이 아니면 재탐색
-history.save_state(volume, autoplay, strategy=None, probed=None)
+                # cookies  = Chrome 쿠키 허용 여부 | None(아직 묻지 않음 → yp가 첫 재생 전 1회 질문)
+history.save_state(volume, autoplay, strategy=None, probed=None, cookies=None)
+debuglog.setup(env=None) -> 로그 파일 경로 | None   # YP_DEBUG=1 → ~/.config/yp/debug.log, 그 외 값은 경로
+debuglog.get(name) -> logging.Logger            # 'yp.<name>'. 삼킨 예외마다 .debug(..., exc_info=True)
 yp._today() -> "YYYY-MM-DD"                    # 재탐색 판정용. 테스트는 이것만 고정한다
 ```
 
@@ -130,6 +139,8 @@ yp._today() -> "YYYY-MM-DD"                    # 재탐색 판정용. 테스트�
 
 - Main repo: https://github.com/cleanhyune/yp-player-in-cli
 - Homebrew tap: https://github.com/cleanhyune/homebrew-yp (`Formula/yp.rb`)
+
+CI: `.github/workflows/test.yml` runs pytest on 3.10/3.11/3.12 and builds the sdist on every push to `main` and every PR, and fails if any top-level `.py` module is missing from the tarball — the same check that would have caught the v0.3.0 packaging bug below. `tests/` is tracked (it was git-ignored until 2026-09-21; `docs/` still is).
 
 **Releasing a new version:**
 1. Commit changes, `git tag vX.X.X && git push origin vX.X.X`

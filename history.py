@@ -133,6 +133,8 @@ def load_state() -> dict:
     # strategy를 마지막으로 다시 탐색한 날짜(ISO). 날짜 형식도 검증하지 않는다 —
     # 오늘과 다르면 재탐색이라는 규칙이므로 이상한 값은 그냥 재탐색을 한 번 더 유발한다.
     probed = data.get("probed")
+    # Chrome 쿠키 시도를 허용했는지. None은 아직 묻지 않았다는 뜻이고, yp가 첫 재생 전에 묻는다.
+    cookies = data.get("cookies")
     if not isinstance(volume, int) or isinstance(volume, bool):
         volume = 100
     if not isinstance(autoplay, bool):
@@ -141,10 +143,13 @@ def load_state() -> dict:
         strategy = None
     if not isinstance(probed, str):
         probed = None
-    return {"volume": volume, "autoplay": autoplay, "strategy": strategy, "probed": probed}
+    if not isinstance(cookies, bool):
+        cookies = None
+    return {"volume": volume, "autoplay": autoplay, "strategy": strategy, "probed": probed,
+            "cookies": cookies}
 
 
 def save_state(volume: int, autoplay: bool, strategy: str | None = None,
-               probed: str | None = None) -> None:
+               probed: str | None = None, cookies: bool | None = None) -> None:
     _write_json(_state_path(), {"volume": int(volume), "autoplay": bool(autoplay),
-                                "strategy": strategy, "probed": probed})
+                                "strategy": strategy, "probed": probed, "cookies": cookies})

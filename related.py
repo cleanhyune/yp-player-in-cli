@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import re
 
+import debuglog
 from innertube import fetch_initial_data
+
+_log = debuglog.get("related")
+
 
 def extract_video_id(url: str) -> str | None:
     match = re.search(r"[?&]v=([\w-]{11})", url)
@@ -59,8 +63,9 @@ def fetch_next(url: str, played_ids: set[str], current_channel: str | None = Non
             try:
                 candidates.append(_lockup_to_video(lockup))
             except Exception:
-                continue
+                _log.debug("사이드바 항목 파싱 실패 (%s)", content_id, exc_info=True)
     except Exception:
+        _log.debug("연관 영상 조회 실패 (%s)", video_id, exc_info=True)
         return None
 
     if not candidates:
