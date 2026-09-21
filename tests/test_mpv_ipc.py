@@ -58,6 +58,12 @@ class FakeMpv:
 
     def close(self):
         self.connected.wait(2)
+        # 서버 스레드가 recv()에 막혀 있는 소켓이다. Linux는 close()만으로는 상대에게
+        # 끊김이 가지 않으므로(recv가 돌아올 때까지 유지) shutdown으로 먼저 깨운다.
+        try:
+            self.conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         self.conn.close()
         self._server.close()
 
