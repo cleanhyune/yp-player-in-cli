@@ -7,6 +7,7 @@ from datetime import date
 warnings.filterwarnings("ignore")
 import questionary
 
+import debuglog
 import history
 from channel import ChannelQueue, resolve_channel
 from player import PlayerError, PlayerSession, check_mpv, resolve_stream
@@ -52,7 +53,7 @@ class _Prefetch:
         if not session.closed:
             session.set_next_hint(_hint(next_video))
         # 직접 URL을 미리 풀어 곡 전환의 ytdl_hook(~1.9초)을 없앤다. None이면 load()가 예전 경로로 간다.
-        stream = resolve_stream(next_video["url"], session.strategy)
+        stream = resolve_stream(next_video["url"], session.strategy, session.cookies)
         self._box["result"] = {**next_video, "stream": stream,
                                "duration": stream.duration if stream else 0}
 
@@ -69,11 +70,23 @@ def _ask(prompt: str) -> str:
     return questionary.text(prompt).ask() or ""
 
 
+def _ask_cookies() -> bool:
+    print("YouTube가 봇 인증을 요구하면 yp는 마지막 수단으로 Chrome에 저장된 쿠키로 재시도할 수 있습니다.")
+    print("로그인된 Chrome이면 yp로 들은 영상이 그 계정의 YouTube 시청 기록에 남을 수 있습니다.")
+    print("이 선택은 한 번만 묻고 ~/.config/yp/state.json의 cookies 값으로 저장됩니다.")
+    answer = questionary.confirm("Chrome 쿠키 사용을 허용할까요?", default=False).ask()
+    return bool(answer)
+
+
 def main():
     if not check_mpv():
         print("mpv가 설치되어 있지 않습니다. 아래 명령어로 설치하세요:")
         print("  brew install mpv")
         sys.exit(1)
+
+    log_path = debuglog.setup()
+    if log_path:
+        print(f"디버그 로그: {log_path}")
 
     try:
         args = sys.argv[1:]
@@ -182,8 +195,13 @@ def _play_session(video: dict, find_next=None, end_note: str = "다음 영상을
     # 자동재생 체인 중간에는 끼지 않는다.
     today = _today()
     strategy = state["strategy"] if state["probed"] == today else None
+    tty = sys.stdin.isatty()
+    cookies = state["cookies"]
+    if cookies is None:
+        # 아직 대체 화면에 들어가기 전이라 평범한 프롬프트를 띄울 수 있는 마지막 지점이다.
+        cookies = _ask_cookies() if tty else False
     session = PlayerSession(volume=state["volume"], autoplay=state["autoplay"],
-                            tty=sys.stdin.isatty(), strategy=strategy)
+                            tty=tty, strategy=strategy, cookies=cookies)
     # 지나온 곡을 그대로 들고 있는 재생목록. n/자동재생은 index를 올리고 p는 내린다.
     # 뒤로 갔다 다시 앞으로 와도 같은 곡으로 돌아오도록 자르지 않고 append만 한다.
     chain: list[dict] = [video]
@@ -278,7 +296,7 @@ def _play_session(video: dict, find_next=None, end_note: str = "다음 영상을
         notes.append("재생을 중단합니다.")
     finally:
         try:
-            history.save_state(session.volume, session.autoplay, session.strategy, today)
+            history.save_state(session.volume, session.autoplay, session.strategy, today, cookies)
         except Exception:
             pass
         session.quit()

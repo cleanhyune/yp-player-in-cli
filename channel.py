@@ -6,8 +6,10 @@ from collections import Counter
 
 from yt_dlp import YoutubeDL
 
+import debuglog
 from ytdlp_common import SilentLogger
 
+_log = debuglog.get("channel")
 PAGE_SIZE = 30
 _BASE_OPTS = {
     "quiet": True,
@@ -52,6 +54,7 @@ def resolve_channel(query: str) -> dict | None:
         cid = Counter(e["channel_id"] for e in entries).most_common(1)[0][0]
         return _channel_of(next(e for e in entries if e["channel_id"] == cid))
     except Exception:
+        _log.debug("채널 해석 실패 (%s)", query, exc_info=True)
         return None
 
 
@@ -84,6 +87,7 @@ class ChannelQueue:
             try:
                 page = channel_videos(self.channel["id"], self._pages + 1, self.channel["name"])
             except Exception:
+                _log.debug("채널 영상 목록 조회 실패 page=%s", self._pages + 1, exc_info=True)
                 page = []
             self._pages += 1
             self.videos.extend(page)

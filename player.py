@@ -5,6 +5,7 @@ import queue
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from typing import Callable
 
 from yt_dlp import YoutubeDL
 
+import debuglog
 from comments import SORT_LABELS, CommentFeed, ReplyFeed, format_comment, format_header, next_sort
 from mpv_ipc import MpvClient, MpvError
 from ytdlp_common import SilentLogger
@@ -19,8 +21,8 @@ from tui import (KeyReader, LinePrompt, Pager, Screen, comments_height, enter_al
                  exit_alt_screen, hide_cursor, parse_timecode, render_comments,
                  render_playing, show_cursor, terminal_mode, terminal_size)
 
-_IPC_SOCKET = "/tmp/yp_mpv_socket"
 _COOKIE_BROWSER = "chrome"
+_log = debuglog.get("player")
 # (player_client, 쿠키를 붙일지) 순서대로 시도한다.
 #
 # android가 익명으로 거의 모든 영상을 첫 시도에 열고(2~3초), web_embedded는 실패 후 폴백에
@@ -58,6 +60,11 @@ class PlayerError(Exception):
     pass
 
 
+def _socket_path() -> str:
+    # 세션마다 다른 경로여야 한다. 고정 경로면 두 번째 yp가 첫 번째의 소켓 파일을 지운다.
+    return os.path.join(tempfile.gettempdir(), f"yp_mpv_{os.getpid()}.sock")
+
+
 def _raw_options(client: str, cookies: bool) -> str:
     """mpv의 ytdl-raw-options 문자열. 콤마로 나뉜 key=value 목록이다."""
     opts = f"extractor-args=youtube:player_client={client}"
@@ -66,14 +73,16 @@ def _raw_options(client: str, cookies: bool) -> str:
     return opts
 
 
-def _attempt_order(preferred: str | None) -> list[tuple[str, bool]]:
+def _attempt_order(preferred: str | None, cookies: bool = True) -> list[tuple[str, bool]]:
     """지난번에 통한 시도를 맨 앞으로 돌리고, 나머지는 _ATTEMPTS 순서를 지킨다.
+    cookies=False면 쿠키를 붙이는 칸을 뺀다 — 사용자가 시청 기록 노출을 거절한 경우다.
 
     차단이 걸린 상태에서 매 영상마다 익명 시도 두 칸을 버리지 않기 위한 것이다 (mpv를
     거친 실측 약 5.7초 — yt-dlp 자체 실패는 3.4초고 나머지는 mpv가 시도마다 ytdl_hook을
     다시 띄우는 비용). preferred가 지금은 없는 이름이면 그냥 기본 순서로 돈다."""
-    front = [a for a in _ATTEMPTS if a[0] == preferred]
-    return front + [a for a in _ATTEMPTS if a[0] != preferred]
+    attempts = [a for a in _ATTEMPTS if cookies or not a[1]]
+    front = [a for a in attempts if a[0] == preferred]
+    return front + [a for a in attempts if a[0] != preferred]
 
 
 def check_mpv() -> bool:
@@ -89,21 +98,22 @@ class Stream:
     duration: float = 0.0
 
 
-def resolve_stream(url: str, strategy: str | None) -> Stream | None:
+def resolve_stream(url: str, strategy: str | None, cookies: bool = True) -> Stream | None:
     """load()와 같은 _attempt_order를 걷어 직접 URL을 푼다. mpv를 거치지 않아 실패한 시도가
     곡 사이 공백으로 드러나지 않는다. 어떤 예외도 삼켜 None — 그러면 load()가 예전 경로로 간다."""
-    for client, cookies in _attempt_order(strategy):
+    for client, use_cookies in _attempt_order(strategy, cookies):
         opts = {
             "quiet": True, "no_warnings": True, "logger": SilentLogger(),
             "format": "bestaudio/best",
             "extractor_args": {"youtube": {"player_client": [client]}},
         }
-        if cookies:
+        if use_cookies:
             opts["cookiesfrombrowser"] = (_COOKIE_BROWSER,)
         try:
             with YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
         except Exception:
+            _log.debug("스트림 사전 해석 실패 client=%s cookies=%s", client, use_cookies, exc_info=True)
             continue
         direct = (info or {}).get("url")
         if direct:
@@ -136,9 +146,10 @@ class PlayerSession:
     """
 
     def __init__(self, volume: int = 100, autoplay: bool = True, tty: bool = True,
-                 strategy: str | None = None):
+                 strategy: str | None = None, cookies: bool = True):
         self.volume = volume
         self.autoplay = autoplay
+        self.cookies = cookies
         # 돌아갈 이전 곡이 있는지. 재생목록은 yp가 쥐고 있으므로 player는 이 불리언
         # 하나만 본다. 매 load() 전에 yp가 세운다.
         self.has_prev = False
@@ -186,23 +197,21 @@ class PlayerSession:
         self._screen = Screen(sys.stdout)
         self._in_screen = False
         self._load_generation = 0
+        self._socket = _socket_path()
 
     # ----- lifecycle -----
 
     def start(self) -> None:
-        try:
-            os.remove(_IPC_SOCKET)
-        except FileNotFoundError:
-            pass
+        self._remove_socket()
         self._proc = subprocess.Popen(
             ["mpv", "--no-video", "--no-terminal", "--idle=yes",
              "--ytdl-format=bestaudio/best",
              f"--script-opts=ytdl_hook-ytdl_path={_ytdlp_path()}",
              f"--volume={self.volume}",
-             f"--input-ipc-server={_IPC_SOCKET}"],
+             f"--input-ipc-server={self._socket}"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        self._client = MpvClient(_IPC_SOCKET)
+        self._client = MpvClient(self._socket)
         try:
             self._client.connect(timeout=5.0)
             for index, name in enumerate(_OBSERVED, start=1):
@@ -241,10 +250,17 @@ class PlayerSession:
         self._terminate_process()
         if self._client is not None:
             self._client.close()
+        self._remove_socket()
         if self._term is not None:
             self._term.__exit__(None, None, None)
             self._term = None
         self.closed = True
+
+    def _remove_socket(self) -> None:
+        try:
+            os.remove(self._socket)
+        except FileNotFoundError:
+            pass
 
     def _terminate_process(self, kill: bool = False) -> None:
         if self._proc is None:
@@ -281,7 +297,7 @@ class PlayerSession:
                 reason = self._play_direct(stream, start)
                 if reason != "error" or self.closed:
                     return reason
-            attempts = _attempt_order(self.strategy)
+            attempts = _attempt_order(self.strategy, self.cookies)
             for index, (client, cookies) in enumerate(attempts):
                 is_final = index == len(attempts) - 1
                 try:
@@ -593,6 +609,7 @@ class PlayerSession:
                         ev["header"] = [title, "", "댓글이 없습니다."]
                 events.put(ev)
             except Exception:
+                _log.debug("댓글 조회 실패 (%s)", fail_event, exc_info=True)
                 events.put({"event": fail_event, "generation": gen, "pager": pager})
 
         self._comments_generation = gen
