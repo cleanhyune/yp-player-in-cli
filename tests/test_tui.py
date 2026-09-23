@@ -3,7 +3,7 @@ import re
 import pytest
 
 from tui import (LinePrompt, Pager, display_width, parse_keys,
-                 parse_timecode, render_playing, truncate)
+                 parse_timecode, render_playing, truncate, wrap_line)
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -65,6 +65,26 @@ def test_truncate_keeps_text_within_width_and_adds_ellipsis():
     out = truncate("가나다라마바사", 8)
     assert out.endswith("…")
     assert display_width(out) <= 8
+
+
+# --- wrap_line ---
+
+def test_wrap_line_breaks_by_display_width_and_keeps_the_indent():
+    assert wrap_line("     " + "가" * 10, 12) == [
+        "     가가가", "     가가가", "     가가가", "     가"]
+
+
+def test_wrap_line_prefers_breaking_at_a_space():
+    assert wrap_line("     hello world foo", 14) == ["     hello", "     world foo"]
+
+
+def test_wrap_line_leaves_short_lines_alone():
+    assert wrap_line("     짧다", 80) == ["     짧다"]
+    assert wrap_line("", 80) == [""]
+
+
+def test_wrap_line_hard_breaks_when_the_indent_leaves_no_room():
+    assert wrap_line("     abc", 3) == ["     abc"]
 
 
 # --- Pager ---
@@ -374,8 +394,9 @@ def test_fit_truncates_cjk_into_a_single_column():
 def test_progress_bar_characters_share_an_east_asian_width_class():
     """등급이 섞이면 ambiguous=2 터미널에서 재생 중 막대 폭이 자란다."""
     import unicodedata
-    from tui import _BAR_EMPTY, _BAR_FULL
-    assert unicodedata.east_asian_width(_BAR_FULL) == unicodedata.east_asian_width(_BAR_EMPTY)
+    from tui import _BAR_EMPTY, _BAR_FULL, _BAR_KNOB
+    classes = {unicodedata.east_asian_width(ch) for ch in (_BAR_FULL, _BAR_EMPTY, _BAR_KNOB)}
+    assert len(classes) == 1
 
 
 def test_progress_bar_width_is_exact_regardless_of_ratio():
@@ -386,8 +407,9 @@ def test_progress_bar_width_is_exact_regardless_of_ratio():
 
 def test_progress_bar_fills_proportionally():
     from tui import progress_bar
-    assert plain(progress_bar(50, 100, 10)) == "█████▒▒▒▒▒"
-    assert plain(progress_bar(100, 100, 10)) == "██████████"
+    assert plain(progress_bar(50, 100, 10)) == "━━━━━●────"
+    assert plain(progress_bar(100, 100, 10)) == "━━━━━━━━━●"
+    assert plain(progress_bar(0, 100, 10)) == "●─────────"
 
 
 def test_progress_bar_dims_only_the_remaining_portion(monkeypatch):
@@ -396,17 +418,25 @@ def test_progress_bar_dims_only_the_remaining_portion(monkeypatch):
     from tui import progress_bar
     bar = progress_bar(50, 100, 10)
     assert "\x1b[2m" in bar          # 남은 칸에 dim이 실제로 걸린다
-    assert not bar.startswith("\x1b[2m")  # 채운 칸(맨 앞)은 dim이 아니다
+    assert bar.startswith("\x1b[36m")  # 채운 칸과 손잡이는 강조색
+
+
+def test_accent_wraps_with_cyan_and_reset(monkeypatch):
+    from tui import accent
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    assert accent("x") == "\x1b[36mx\x1b[0m"
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert accent("x") == "x"
 
 
 def test_progress_bar_with_unknown_duration_is_all_empty():
     from tui import progress_bar
-    assert plain(progress_bar(30, 0, 8)) == "▒▒▒▒▒▒▒▒"
+    assert plain(progress_bar(30, 0, 8)) == "────────"
 
 
 def test_progress_bar_clamps_position_past_the_end():
     from tui import progress_bar
-    assert plain(progress_bar(500, 100, 10)) == "██████████"
+    assert plain(progress_bar(500, 100, 10)) == "━━━━━━━━━●"
 
 
 def test_progress_bar_with_zero_width_is_empty():
@@ -448,7 +478,7 @@ def test_render_playing_box_lines_all_share_one_width():
     for cols in (44, 45, 60, 80, 120, 200):
         widths = {display_width(plain(line))
                   for line in render_playing(_pstate(), cols, 24)
-                  if plain(line).strip().startswith(("┌", "│", "└"))}
+                  if plain(line).strip().startswith(("╭", "│", "╰"))}
         assert len(widths) == 1, f"cols={cols}: {widths}"
 
 
@@ -457,7 +487,7 @@ def test_render_playing_shows_title_and_channel():
     text = "\n".join(plain(l) for l in render_playing(_pstate(), 80, 24))
     assert "침착맨 삼국지 완전판" in text
     assert "1:02" in text and "5:06:18" in text
-    assert "vol 60" in text
+    assert "vol ▮▮▮▮▮▯▯▯ 60" in text
 
 
 def test_render_playing_notice_does_not_shift_other_lines():
@@ -473,7 +503,7 @@ def test_render_playing_notice_does_not_shift_other_lines():
 def test_render_playing_shows_next_hint_only_when_present():
     from tui import render_playing
     text = "\n".join(plain(l) for l in render_playing(_pstate(next_hint="2화 · 채널"), 80, 24))
-    assert "↳ 2화 · 채널" in text
+    assert "↳ 다음: 2화 · 채널" in text
     text = "\n".join(plain(l) for l in render_playing(_pstate(), 80, 24))
     assert "↳" not in text
 
@@ -522,13 +552,13 @@ def test_render_playing_falls_back_to_track_duration_before_mpv_reports_one():
 def test_render_playing_uses_the_box_on_a_tall_terminal():
     from tui import render_playing
     text = "\n".join(plain(l) for l in render_playing(_pstate(), 80, 24))
-    assert "┌" in text and "└" in text
+    assert "╭" in text and "╯" in text
 
 
 def test_render_playing_drops_the_box_on_a_short_terminal():
     from tui import render_playing
     text = "\n".join(plain(l) for l in render_playing(_pstate(), 80, 12))
-    assert "┌" not in text
+    assert "╭" not in text
     assert "침착맨 삼국지 완전판" in text
     assert "q 종료" in text
 
@@ -711,3 +741,71 @@ def test_the_key_hint_line_lists_prev_next_in_playing_order():
     tail = plain(lines[-1])
     assert "p 이전" in tail and "n 다음" in tail
     assert tail.index("p 이전") < tail.index("n 다음")
+
+
+def test_pager_reflow_wraps_long_lines_to_the_width_and_moves_anchors():
+    p = Pager(["제목", ""])
+    p.add_items([[" 1. 유저", "     " + "a" * 20, ""], [" 2. 유저", "     b", ""]], [1, 2])
+    p.reflow(15, 5)
+    assert p.lines == ["제목", "", " 1. 유저", "     " + "a" * 10, "     " + "a" * 10, "",
+                       " 2. 유저", "     b", ""]
+    assert p.anchors == [2, 6]
+    p.reflow(80, 5)
+    assert p.lines == ["제목", "", " 1. 유저", "     " + "a" * 20, "", " 2. 유저", "     b", ""]
+    assert p.anchors == [2, 5]
+
+
+def test_pager_reflow_keeps_the_cursor_block_and_pulls_it_into_view():
+    p = Pager()
+    p.add_items([[f" {i}. x", "     " + "a" * 20, ""] for i in range(6)], list(range(6)))
+    p.handle_key("END", 5)
+    assert p.cursor == 5
+    p.reflow(15, 5)
+    assert p.cursor == 5 and p.selected_payload() == 5
+    start, end = p.selected_range()
+    assert p.top <= start and end <= p.top + 5 or p.top == start
+
+
+def test_pager_add_items_after_reflow_wraps_the_new_blocks_too():
+    p = Pager()
+    p.reflow(15, 5)
+    p.add_items([[" 1. x", "     " + "a" * 20, ""]], [1])
+    assert p.lines == [" 1. x", "     " + "a" * 10, "     " + "a" * 10, ""]
+    p.replace_items(["머리 " + "가" * 10], [[" 1. y", ""]], [1])
+    assert p.lines == ["머리", "가가가가가가가", "가가가", " 1. y", ""]
+
+
+def test_render_playing_top_border_carries_a_now_playing_tag_that_flips_when_paused():
+    from tui import render_playing
+    top = next(plain(l) for l in render_playing(_pstate(), 80, 24) if "╭" in plain(l))
+    assert "♪ NOW PLAYING" in top and top.endswith("╮")
+    top = next(plain(l) for l in render_playing(_pstate(paused=True), 80, 24) if "╭" in plain(l))
+    assert "‖ PAUSED" in top and "NOW PLAYING" not in top
+
+
+def test_render_playing_volume_gauge_has_eight_segments_and_clamps():
+    from tui import render_playing
+    text = "\n".join(plain(l) for l in render_playing(_pstate(volume=130), 80, 24))
+    assert "vol ▮▮▮▮▮▮▮▮ 130" in text
+    text = "\n".join(plain(l) for l in render_playing(_pstate(volume=0), 80, 24))
+    assert "vol ▯▯▯▯▯▯▯▯ 0" in text
+
+
+def test_render_playing_autoplay_gets_a_cycle_icon_only_when_on():
+    from tui import render_playing
+    on_text = "\n".join(plain(l) for l in render_playing(_pstate(autoplay=True), 80, 24))
+    off_text = "\n".join(plain(l) for l in render_playing(_pstate(autoplay=False), 80, 24))
+    assert "⟳ 자동재생 ON" in on_text
+    assert "⟳" not in off_text and "자동재생 OFF" in off_text
+
+
+def test_render_playing_labels_the_next_track():
+    from tui import render_playing
+    text = "\n".join(plain(l) for l in render_playing(_pstate(next_hint="2화 · 채널"), 80, 24))
+    assert "↳ 다음: 2화 · 채널" in text
+
+
+def test_volume_gauge_glyphs_share_an_east_asian_width_class():
+    import unicodedata
+    from tui import _VOL_EMPTY, _VOL_FULL
+    assert unicodedata.east_asian_width(_VOL_FULL) == unicodedata.east_asian_width(_VOL_EMPTY)

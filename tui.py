@@ -90,11 +90,12 @@ def truncate(text: str, width: int) -> str:
     return out + "…"
 
 
-_BOLD, _DIM, _RESET = "\x1b[1m", "\x1b[2m", "\x1b[0m"
-# 두 문자의 East Asian Width 등급이 같아야 한다(둘 다 A). 등급이 섞이면
-# ambiguous를 2칸으로 렌더하는 터미널(한국어/일본어 로케일에서 흔함)에서 채운 칸만
-# 넓어져, 재생이 진행될수록 막대의 실제 폭이 자라고 프레임이 깨진다.
-_BAR_FULL, _BAR_EMPTY = "█", "▒"
+_BOLD, _DIM, _ACCENT, _RESET = "\x1b[1m", "\x1b[2m", "\x1b[36m", "\x1b[0m"
+# 한 막대 안의 문자는 East Asian Width 등급이 같아야 한다(━─● 모두 A, ▮▯ 모두 N).
+# 등급이 섞이면 ambiguous를 2칸으로 렌더하는 터미널(한국어 로케일에서 흔함)에서 채운
+# 칸만 넓어져, 재생이 진행될수록 막대의 실제 폭이 자라고 프레임이 깨진다.
+_BAR_FULL, _BAR_EMPTY, _BAR_KNOB = "━", "─", "●"
+_VOL_FULL, _VOL_EMPTY = "▮", "▯"
 
 
 def styles_enabled() -> bool:
@@ -114,6 +115,43 @@ def dim(text: str) -> str:
     return f"{_DIM}{text}{_RESET}" if styles_enabled() else text
 
 
+def accent(text: str) -> str:
+    """유일한 색. 터미널 기본 팔레트의 cyan 하나만 써서 테마와의 충돌을 최소로 둔다."""
+    return f"{_ACCENT}{text}{_RESET}" if styles_enabled() else text
+
+
+def wrap_line(line: str, width: int) -> list[str]:
+    """표시 폭 기준으로 접는다. 공백이 있으면 거기서, 없으면(한글 장문) 칸 수로 끊는다.
+    이어지는 줄은 원본의 앞 공백만큼 들여쓴다. 들여쓰기만으로 폭이 차면 접지 않는다.
+    """
+    indent = line[:len(line) - len(line.lstrip(" "))]
+    body = line[len(indent):]
+    room = width - display_width(indent)
+    if room <= 0 or display_width(body) <= room:
+        return [line]
+    out = []
+    while display_width(body) > room:
+        used = cut = 0
+        for i, ch in enumerate(body):
+            w = _char_width(ch)
+            if used + w > room:
+                break
+            used += w
+            cut = i + 1
+        if cut == 0:
+            break
+        space = body.rfind(" ", 0, cut + 1)
+        if space > 0:
+            out.append(indent + body[:space])
+            body = body[space + 1:].lstrip(" ")
+        else:
+            out.append(indent + body[:cut])
+            body = body[cut:]
+    if body or not out:
+        out.append(indent + body)
+    return out
+
+
 def _fit(text: str, width: int) -> str:
     """평문을 width에 맞춰 자르고 오른쪽을 공백으로 채운다.
 
@@ -126,18 +164,15 @@ def _fit(text: str, width: int) -> str:
 
 
 def progress_bar(position: float, duration: float, width: int) -> str:
-    """채운 칸은 기본색, 남은 칸은 dim. 길이를 모르면(duration<=0) 전부 남은 칸."""
+    """채운 칸과 손잡이(●)는 강조색, 남은 칸은 dim. 길이를 모르면 손잡이 없이 전부 남은 칸."""
     if width <= 0:
         return ""
     if duration <= 0:
         return dim(_BAR_EMPTY * width)
     ratio = min(max(position / duration, 0.0), 1.0)
-    filled = int(round(ratio * width))
-    if filled <= 0:
-        return dim(_BAR_EMPTY * width)
-    if filled >= width:
-        return _BAR_FULL * width
-    return _BAR_FULL * filled + dim(_BAR_EMPTY * (width - filled))
+    knob = int(ratio * (width - 1) + 0.5)
+    rest = width - knob - 1
+    return accent(_BAR_FULL * knob + _BAR_KNOB) + (dim(_BAR_EMPTY * rest) if rest > 0 else "")
 
 
 _CARD_MAX_WIDTH = 72       # 박스 전체 폭 상한 (테두리 포함)
@@ -164,14 +199,25 @@ def _times(state: dict) -> tuple[str, str, float, float]:
     return left, right, pos, dur
 
 
+def _volume_gauge(volume: int, segments: int = 8) -> str:
+    filled = min(segments, max(0, int(volume / 100 * segments + 0.5)))
+    return _VOL_FULL * filled + _VOL_EMPTY * (segments - filled)
+
+
 def _meta_text(state: dict) -> str:
-    on = "ON" if state.get("autoplay") else "OFF"
-    return f"vol {int(state.get('volume') or 0)}      자동재생 {on}"
+    volume = int(state.get("volume") or 0)
+    autoplay = "⟳ 자동재생 ON" if state.get("autoplay") else "  자동재생 OFF"
+    return f"vol {_volume_gauge(volume)} {volume}      {autoplay}"
 
 
 def _next_text(state: dict) -> str:
     hint = state.get("next_hint")
-    return f"↳ {hint}" if hint else ""
+    return f"↳ 다음: {hint}" if hint else ""
+
+
+def _tag_text(state: dict) -> str:
+    # ♪/‖ 둘 다 A등급이라 짝이 맞는다 (_times의 ▶/‖와 같은 이유). 길이 차이는 테두리가 흡수한다.
+    return "‖ PAUSED" if state.get("paused") else "♪ NOW PLAYING"
 
 
 def _tail_line(state: dict, cols: int) -> str:
@@ -207,9 +253,11 @@ def _boxed_card(state: dict, cols: int, height: int) -> list[str]:
     inner = outer - 2
     margin = " " * ((cols - outer) // 2)
     rows = _card_rows(state, inner - 4)
-    box = [margin + "┌" + "─" * inner + "┐"]
+    tag = f" {_tag_text(state)} "
+    side = max(0, inner - display_width(tag))
+    box = [margin + "╭" + "─" * (side // 2) + accent(tag) + "─" * (side - side // 2) + "╮"]
     box += [margin + "│  " + row + "  │" for row in rows]
-    box.append(margin + "└" + "─" * inner + "┘")
+    box.append(margin + "╰" + "─" * inner + "╯")
     return [""] * max(0, (height - len(box)) // 2) + box
 
 
@@ -311,6 +359,10 @@ class Pager:
 
     def __init__(self, header: list[str] | None = None, more: bool = False, hint: str | None = None):
         self.header: list[str] = list(header or [])
+        # header/_blocks가 원본(논리 줄)이고 lines/anchors는 width로 접은 파생물이다.
+        # width가 None이면 접지 않는다. reflow()가 터미널 폭을 받아 다시 만든다.
+        self._blocks: list[list[str]] = []
+        self.width: int | None = None
         self.lines: list[str] = list(self.header)
         self.anchors: list[int] = []
         self.payloads: list = []
@@ -322,23 +374,41 @@ class Pager:
         self.more = more
         self.status: str | None = None
 
+    def _wrap(self, lines: list[str]) -> list[str]:
+        if self.width is None:
+            return list(lines)
+        return [out for line in lines for out in wrap_line(line, self.width)]
+
     def add_items(self, blocks: list[list[str]], payloads: list | None = None) -> None:
         """블록을 뒤에 붙인다. 스크롤과 커서는 그대로."""
         if payloads is None:
             payloads = [None] * len(blocks)
         for block, payload in zip(blocks, payloads):
+            self._blocks.append(list(block))
             self.anchors.append(len(self.lines))
             self.payloads.append(payload)
-            self.lines.extend(block)
+            self.lines.extend(self._wrap(block))
 
     def replace_items(self, header: list[str], blocks: list[list[str]],
                       payloads: list | None = None) -> None:
         """내용을 통째로 갈아끼운다 (정렬 전환). 커서와 스크롤은 처음으로."""
         self.header = list(header)
-        self.lines = list(self.header)
-        self.anchors, self.payloads = [], []
+        self.lines = self._wrap(self.header)
+        self._blocks, self.anchors, self.payloads = [], [], []
         self.cursor = self.top = 0
         self.add_items(blocks, payloads)
+
+    def reflow(self, width: int, height: int) -> None:
+        """터미널 폭에 맞춰 줄을 다시 접는다. 커서(블록)는 그대로, 화면 안에 남긴다."""
+        if width == self.width:
+            return
+        self.width = width
+        self.lines = self._wrap(self.header)
+        self.anchors = []
+        for block in self._blocks:
+            self.anchors.append(len(self.lines))
+            self.lines.extend(self._wrap(block))
+        self._ensure_visible(height)
 
     def visible(self, height: int) -> list[str]:
         return self.lines[self.top:self.top + height]

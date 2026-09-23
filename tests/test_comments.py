@@ -288,11 +288,12 @@ def test_format_comment_marks_replies_with_an_arrow():
     assert format_comment(_c(author="X"), 2, reply=True)[0] == "  2. ↳ X"
 
 
-def test_format_comment_wraps_long_text_and_splits_newlines():
+def test_format_comment_keeps_paragraphs_unwrapped_and_splits_newlines():
+    """접는 일은 Pager.reflow가 터미널 폭을 알고 한다. 여기서는 문단만 나눈다."""
     lines = format_comment(_c(text="a" * 100 + "\nb"), 1)
-    assert lines[1] == "     " + "a" * 76
-    assert lines[2] == "     " + "a" * 24
-    assert lines[3] == "     b"
+    assert lines[1] == "     " + "a" * 100
+    assert lines[2] == "     b"
+    assert lines[3] == ""
 
 
 def test_format_header_with_and_without_a_note():

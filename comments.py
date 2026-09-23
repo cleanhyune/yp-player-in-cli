@@ -201,17 +201,6 @@ class ReplyFeed:
         return replies, self._next is not None
 
 
-def _wrap(text: str, width: int, indent: str) -> list[str]:
-    lines = []
-    for paragraph in text.splitlines() or [""]:
-        while True:
-            lines.append(indent + paragraph[:width])
-            paragraph = paragraph[width:]
-            if not paragraph:
-                break
-    return lines
-
-
 def format_header(title: str, note: str | None = None) -> list[str]:
     """페이저 머리: 제목, 구분선, (정렬 안내), 빈 줄."""
     lines = [title, "━" * 44]
@@ -235,6 +224,6 @@ def format_comment(c: dict, index: int, reply: bool = False) -> list[str]:
     meta = "".join(f" | {part}" for part in parts)
     author = c.get("author") or "알 수 없음"
     lines = [f" {index:2}. {'↳ ' if reply else ''}{author}{meta}"]
-    lines.extend(_wrap(c.get("text") or "", 76, "     "))
+    lines.extend("     " + paragraph for paragraph in (c.get("text") or "").splitlines() or [""])
     lines.append("")
     return lines

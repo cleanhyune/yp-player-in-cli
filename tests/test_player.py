@@ -1319,3 +1319,21 @@ def test_resolve_stream_skips_cookie_attempts_when_declined():
         patcher.stop()
     opts = _ydl_opts(MockYDL)
     assert len(opts) == 2 and not any("cookiesfrombrowser" in o for o in opts)
+
+
+def test_long_comment_text_wraps_to_the_terminal_width_instead_of_being_cut():
+    """80칸 터미널에서 한글 60자(120칸)는 두 줄로 접혀 전부 보여야 한다."""
+    from tui import display_width
+    with tty_session() as (s, out):
+        pager = _open(s, ["     " + "가" * 60])
+        s._redraw(force=True)
+        assert pager.width == 80
+        assert all(display_width(line) <= 80 for line in pager.lines)
+        assert "".join(line.strip() for line in pager.lines).count("가") == 60
+
+
+def test_pager_keys_see_the_reflowed_layout_before_the_first_redraw():
+    with tty_session() as (s, out):
+        pager = _open(s, ["     " + "가" * 60, "x"])
+        s._modal_key("j")
+        assert pager.width == 80 and pager.cursor == 1

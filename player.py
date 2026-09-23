@@ -498,8 +498,9 @@ class PlayerSession:
     def _modal_key(self, key: str) -> None:
         modal = self._modal
         if isinstance(modal, Pager):
-            _, rows = terminal_size()
+            cols, rows = terminal_size()
             height = comments_height(rows)
+            modal.reflow(cols, height)
             in_replies = self._parent_pager is not None
             if key == "s":
                 if not in_replies and modal.status is None and self._feed is not None:
@@ -682,6 +683,7 @@ class PlayerSession:
         cols, rows = terminal_size()
         state = self._state()
         if isinstance(self._modal, Pager):
+            self._modal.reflow(cols, comments_height(rows))
             lines = render_comments(state, self._modal, cols, rows)
         else:
             # LinePrompt는 카드를 덮지 않는다. 마지막 행만 프롬프트가 차지한다.
