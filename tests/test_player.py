@@ -193,7 +193,10 @@ def test_start_launches_headless_idle_mpv_with_ipc(session):
     for flag in ("--no-video", "--no-terminal", "--idle=yes", "--ytdl-format=bestaudio/best",
                  "--volume=80", f"--input-ipc-server={session._socket}"):
         assert flag in args
-    assert any(a.startswith("--script-opts=ytdl_hook-ytdl_path=") for a in args)
+    script_opts = [a for a in args if a.startswith("--script-opts=")]
+    assert len(script_opts) == 1
+    assert "ytdl_hook-ytdl_path=" in script_opts[0]
+    assert "ytdl_hook-exclude=googlevideo.com/" in script_opts[0]
     assert not any(a.startswith("--script=") for a in args)
     assert URL not in args  # 영상은 loadfile로 넘긴다
 
@@ -1265,7 +1268,7 @@ def _commands(session, name):
 def test_load_with_a_stream_plays_the_direct_url_without_ytdl(session):
     session._client.events.put(_end("eof"))
     assert session.load(URL, stream=Stream(DIRECT, "android", 617.0)) == "eof"
-    assert ("set", "ytdl", "no") in session._client.commands
+    assert not [c for c in session._client.commands if c[:2] == ("set", "ytdl")]
     assert _commands(session, "loadfile") == [("loadfile", DIRECT)]
     assert _commands(session, "set") and all(c[1] != "ytdl-raw-options" for c in session._client.commands if c[0] == "set")
     assert session.strategy == "android"
@@ -1276,8 +1279,7 @@ def test_load_falls_back_to_the_normal_chain_when_the_direct_url_fails(session):
     session._client.events.put(_end("eof"))        # android 시도
     assert session.load(URL, stream=Stream(DIRECT, "web_safari", 0.0)) == "eof"
     assert _commands(session, "loadfile") == [("loadfile", DIRECT), ("loadfile", URL)]
-    cmds = session._client.commands
-    assert cmds.index(("set", "ytdl", "yes")) < cmds.index(("loadfile", URL))
+    assert not [c for c in session._client.commands if c[:2] == ("set", "ytdl")]
     assert _raw_options(session) == [_ANDROID]    # 폴백은 기억한 전략이 아니라 기본 순서
     assert session.strategy == "android"
 
@@ -1304,11 +1306,10 @@ def test_media_title_is_still_taken_when_playing_through_ytdl(session):
     assert session.title == "mpv가 준 제목"
 
 
-def test_load_without_a_stream_keeps_ytdl_on(session):
+def test_load_never_toggles_the_ytdl_option(session):
     session._client.events.put(_end("eof"))
     session.load(URL)
-    assert ("set", "ytdl", "yes") in session._client.commands
-    assert ("set", "ytdl", "no") not in session._client.commands
+    assert not [c for c in session._client.commands if c[:2] == ("set", "ytdl")]
 
 
 def test_resolve_stream_skips_cookie_attempts_when_declined():

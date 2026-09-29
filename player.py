@@ -206,7 +206,9 @@ class PlayerSession:
         self._proc = subprocess.Popen(
             ["mpv", "--no-video", "--no-terminal", "--idle=yes",
              "--ytdl-format=bestaudio/best",
-             f"--script-opts=ytdl_hook-ytdl_path={_ytdlp_path()}",
+             # 'set ytdl no/yes'를 런타임에 보내면 안 된다 — mpv가 ytdl_hook 스크립트를 내렸다
+             # 다시 올리는데 hook 등록이 비동기라 직후의 loadfile이 hook 없이 돌아 실패한다.
+             f"--script-opts=ytdl_hook-ytdl_path={_ytdlp_path()},ytdl_hook-exclude=googlevideo.com/",
              f"--volume={self.volume}",
              f"--input-ipc-server={self._socket}"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -279,7 +281,7 @@ class PlayerSession:
 
     def load(self, url: str, start: float | None = None, stream: Stream | None = None) -> str:
         """url을 끝까지 재생하고 끝난 사유를 돌려준다. stream(프리페치가 푼 직접 URL)이 있으면
-        ytdl 없이 그것을 먼저 열고, 만료 등으로 실패하면 ytdl을 켜 YouTube URL 시도 체인으로 간다."""
+        그것을 먼저 열고, 만료 등으로 실패하면 YouTube URL 시도 체인으로 간다."""
         assert self._client is not None
         self._url = url
         self._next_requested = False
@@ -301,7 +303,6 @@ class PlayerSession:
             for index, (client, cookies) in enumerate(attempts):
                 is_final = index == len(attempts) - 1
                 try:
-                    self._client.command("set", "ytdl", "yes")
                     self._client.command("set", "ytdl-raw-options",
                                          _raw_options(client, cookies))
                     self._client.command("set", "start", str(int(start)) if start else "none")
@@ -329,7 +330,6 @@ class PlayerSession:
         self._direct = True
         try:
             try:
-                self._client.command("set", "ytdl", "no")
                 self._client.command("set", "start", str(int(start)) if start else "none")
                 self._client.command("loadfile", stream.url)
             except MpvError:
