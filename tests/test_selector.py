@@ -109,9 +109,72 @@ def test_select_recent_returns_none_when_cancelled():
 
 
 def test_select_recent_puts_new_search_first():
-    items = [{"title": "지난 영상", "channel": "채널", "url": "https://youtube.com/watch?v=abc", "duration": 100}]
+    items = [{"title": "지난 영상", "channel": "채널", "url": "https://youtube.com/watch?v=abc", "duration": 100},
+             {"title": "둘째 영상", "channel": "채널", "url": "https://youtube.com/watch?v=def", "duration": 100}]
     with patch("selector.questionary.select") as mock_select:
         mock_select.return_value.ask.return_value = None
         select_recent(items)
     choices = mock_select.call_args[1]["choices"]
     assert choices[0] == "🔍 새로 검색"
+
+
+def test_select_video_puts_channel_duration_and_age_on_a_dim_second_line():
+    videos = [
+        {"title": "새 영상", "channel": "채널", "url": "https://youtube.com/watch?v=a", "duration": 100, "age": "5일 전"},
+        {"title": "옛 영상", "channel": "채널", "url": "https://youtube.com/watch?v=b", "duration": 100},
+    ]
+    with patch("selector.questionary.select") as mock_select:
+        mock_select.return_value.ask.return_value = None
+        select_video(videos)
+        choices = [c for c in mock_select.call_args[1]["choices"]
+                   if isinstance(c, questionary.Choice) and not isinstance(c, questionary.Separator)]
+
+    assert choices[0].title == [("class:text", "새 영상"), ("class:choice-channel", "\n   채널 · 1:40 · 5일 전")]
+    assert choices[1].title == [("class:text", "옛 영상"), ("class:choice-channel", "\n   채널 · 1:40")]
+    assert choices[0].value == "새 영상 · 채널 [1:40]"
+
+
+def test_select_video_puts_a_blank_line_between_videos():
+    videos = [{"title": f"영상{i}", "channel": "채널", "url": f"https://youtube.com/watch?v={i}", "duration": 100} for i in range(3)]
+    with patch("selector.questionary.select") as mock_select:
+        mock_select.return_value.ask.return_value = None
+        select_video(videos)
+        choices = mock_select.call_args[1]["choices"]
+
+    kinds = ["sep" if isinstance(c, questionary.Separator) else "video" for c in choices]
+    assert kinds == ["video", "sep", "video", "sep", "video"]
+
+
+def test_select_recent_uses_the_same_two_line_layout():
+    items = [{"title": "지난 영상", "channel": "채널", "url": "https://youtube.com/watch?v=abc", "duration": 100},
+             {"title": "둘째 영상", "channel": "채널", "url": "https://youtube.com/watch?v=def", "duration": 100}]
+    with patch("selector.questionary.select") as mock_select:
+        mock_select.return_value.ask.return_value = None
+        select_recent(items)
+        choices = mock_select.call_args[1]["choices"]
+
+    assert choices[0] == "🔍 새로 검색"
+    assert isinstance(choices[1], questionary.Separator)
+    assert choices[2].title == [("class:text", "지난 영상"), ("class:choice-channel", "\n   채널 · 1:40")]
+    assert isinstance(choices[3], questionary.Separator)
+    assert choices[4].title[0] == ("class:text", "둘째 영상")
+
+
+def test_select_video_reprompts_when_questionary_returns_an_unknown_value():
+    videos = [{"title": "영상", "channel": "채널", "url": "https://youtube.com/watch?v=abc", "duration": 100}]
+    with patch("selector.questionary.select") as mock_select:
+        mock_select.return_value.ask.side_effect = ["", "영상 · 채널 [1:40]"]
+        result = select_video(videos)
+
+    assert result == "https://youtube.com/watch?v=abc"
+    assert mock_select.call_count == 2
+
+
+def test_select_recent_reprompts_when_questionary_returns_an_unknown_value():
+    items = [{"title": "지난 영상", "channel": "채널", "url": "https://youtube.com/watch?v=abc", "duration": 100}]
+    with patch("selector.questionary.select") as mock_select:
+        mock_select.return_value.ask.side_effect = ["", "지난 영상 · 채널 [1:40]"]
+        result = select_recent(items)
+
+    assert result == "https://youtube.com/watch?v=abc"
+    assert mock_select.call_count == 2

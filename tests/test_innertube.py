@@ -57,3 +57,26 @@ def test_fetch_initial_data_raises_when_the_blob_is_missing():
     fake, _ = _urlopen(b"<html>nothing</html>")
     with patch("innertube.urllib.request.urlopen", fake), pytest.raises(ValueError):
         innertube.fetch_initial_data("abcdefghijk")
+
+
+def test_search_posts_the_query_with_a_korean_web_client_context():
+    fake, calls = _urlopen(b'{"contents": {}}')
+    with patch("innertube.urllib.request.urlopen", fake):
+        assert innertube.search("아이유 라이브") == {"contents": {}}
+    req = calls[0]
+    assert req.full_url.startswith("https://www.youtube.com/youtubei/v1/search")
+    assert req.get_method() == "POST"
+    body = json.loads(req.data)
+    assert body["query"] == "아이유 라이브"
+    assert "continuation" not in body
+    assert body["context"]["client"]["clientName"] == "WEB"
+    assert body["context"]["client"]["hl"] == "ko"
+
+
+def test_search_with_a_continuation_token_sends_the_token_instead_of_the_query():
+    fake, calls = _urlopen(b"{}")
+    with patch("innertube.urllib.request.urlopen", fake):
+        innertube.search(continuation="TOKEN")
+    body = json.loads(calls[0].data)
+    assert body["continuation"] == "TOKEN"
+    assert "query" not in body

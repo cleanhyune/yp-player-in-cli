@@ -6,23 +6,23 @@ CLI tool that searches YouTube and plays audio-only via mpv. macOS only.
 
 ```
 yp.py         # Entry point: search→select→PlayerSession loop, autoplay chain (n/p로 앞뒤 이동), -r/--recent, -c/--channel
-searcher.py   # YouTube search via yt-dlp YoutubeDL API
-selector.py   # Arrow-key selection UI via questionary (search results + recent history)
+searcher.py   # YouTube 검색: innertube youtubei/v1/search 파싱 (제목·채널·길이·업로드 시기 age). yt-dlp 안 씀
+selector.py   # Arrow-key selection UI via questionary (search results + recent history). 항목은 두 줄: 제목 / 흐린 '채널 · 길이 · 시기'
 player.py     # PlayerSession: one mpv process per playback session, driven over JSON IPC
 mpv_ipc.py    # mpv JSON IPC client (request/response matching + event queue). No yp knowledge
 tui.py        # Terminal ownership: cbreak key reader, alt-screen card/comments renderers, timecode prompt
 history.py    # ~/.config/yp/history.json (recent + resume position) and state.json (volume, autoplay)
 related.py    # Next-video lookup by parsing the watch page's related-video sidebar; same-channel first
 channel.py    # -c 채널 모드: 채널 해석(이름/@핸들/URL) + 최신 업로드 30개 단위 페이징 + ChannelQueue(재생 순서)
-innertube.py  # watch 페이지 ytInitialData fetch + youtubei/v1/next POST. related/comments가 공유. yp 지식 없음
+innertube.py  # watch 페이지 ytInitialData fetch + youtubei/v1/next·search POST. searcher/related/comments가 공유. yp 지식 없음
 comments.py   # CommentFeed/ReplyFeed: innertube 커서 페이징 + 블록 포맷터 ('t'로 댓글, Enter로 답글)
 debuglog.py   # YP_DEBUG가 켜졌을 때만 삼킨 예외를 ~/.config/yp/debug.log에 남기는 로거. yp 지식 없음
 ```
 
 ## Key Decisions
 
-- **yt-dlp Python API** (not subprocess) — `YoutubeDL` class with `extract_flat: True` for fast search without fetching full metadata
-- **`_SilentLogger`** in `searcher.py` — suppresses yt-dlp's Python version deprecation warnings
+- **yt-dlp Python API** (not subprocess) — `YoutubeDL` class with `extract_flat: True` for channel listing (`channel.py`) and stream resolution (`player.py`); `ytdlp_common.SilentLogger` suppresses its Python version deprecation warnings
+- **Search comes from innertube, not yt-dlp, so the upload age can be shown** — `searcher.search` POSTs `youtubei/v1/search` (`innertube.search`, `hl=ko`) and parses `videoRenderer` entries (`videoId`, `title.runs`, `ownerText.runs`, `lengthText`, `publishedTimeText`); `lockupViewModel`/`shortsLockupViewModel` (playlists, shorts) are skipped. yt-dlp's flat search only turns *English* `publishedTimeText` ("3 years ago") into a timestamp, and only with `youtubetab:approximate_date`; with the project's `lang: ko` (Korean titles, commit 7df050e) it comes back as "3년 전", the parse fails and the raw text is dropped (2026-09 verified). So `age` is YouTube's own relative string ("5일 전", "1년 전") shown verbatim, like comment ages — search results never carry an absolute date; that would cost one watch-page fetch per video. Pages are 20 (first) + ~18 per `continuationItemRenderer` token, so 30 results take 2 requests (~2.1s measured, same as yt-dlp's `ytsearch30`); the token sits *beside* the `itemSectionRenderer`, not inside it, and `_walk` finds both by key so the first-page and continuation shapes need no separate code. Like `related.py`, this parse is self-maintained: a YouTube reshape means fixing `searcher._parse_page`, not `pip install -U yt-dlp`
 - **Autoplay via sidebar scraping, not yt-dlp** — `related.py` fetches the watch page HTML directly and parses the `ytInitialData` JSON blob for the real "related videos" sidebar (`lockupViewModel` entries under `contents.twoColumnWatchNextResults.secondaryResults...`). An earlier version used yt-dlp's `RD<video_id>` mix playlist, but that mix doesn't exist for many videos (e.g. broadcast/drama clips) — see [[autoplay_related_videos]] memory. yt-dlp deliberately doesn't expose this sidebar, so this parsing is unofficial and self-maintained: if YouTube changes the JSON shape, only fixing `related.py` (not `pip install -U yt-dlp`) will help. `fetch_next()` swallows every exception internally so a broken parse can never propagate into the autoplay loop
 - **`n`/`p`는 재생목록 위의 이동이지 '다음/이전 추천'이 아니다** — `yp._play_session`이 지나온 곡을 `chain: list[dict]` + `index`로 들고 있고, `n`/자동재생은 index를 올리며(체인 끝일 때만 `_Prefetch`로 다음 곡을 뽑아 append) `p`는 내린다. 체인을 자르지 않기 때문에 `p` 뒤의 `n`은 떠났던 바로 그 곡으로 돌아온다 — 별도 로직이 아니라 자료구조에서 따라온다. 세 가지가 여기 붙어 있다: (1) player는 재생목록을 모르고 `session.has_prev` 불리언만 본다. 첫 곡에서 `p`는 스트림을 끊지 않고 메시지만 띄운다 (같은 곡을 다시 여는 스트림 재해석 2~3초를 아끼고, mpv 기본 `p`=일시정지가 새어나가지 않게 삼킨다). (2) `history.resume_position`은 **세션 안에서 그 자리를 처음 재생할 때만** 적용한다(`seen: set[int]`) — 되감아 돌아왔는데 방금 넘긴 지점으로 되돌리면 "이전 곡"이 아니다. `history`의 기록 자체는 그대로 남아 다음 *실행*의 이어보기는 살아 있다. (3) 체인 끝에서 돈 `_Prefetch`는 `prefetches: dict[index, _Prefetch]`에 남겨 `p`로 지나쳤다 `n`으로 돌아와도 같은 조회를 두 번 하지 않는다 (`_Prefetch`는 완료 시 스스로 힌트를 올리므로, 재사용할 때는 `_hint()`로 직접 세워줘야 한다)
 - **Channel mode replaces the sidebar with the channel's upload order** — `yp -c <이름|@핸들|URL>` resolves the channel in `channel.resolve_channel` (a name goes through `ytsearch5` and takes the most common `channel_id` among the hits; `@handle`/URL reads the channel page with `playlist_items=1:1`), lists uploads via yt-dlp flat extraction of `/channel/<id>/videos` in `PAGE_SIZE=30` chunks (`playlist_items="31:60"` etc., 0.5–1s each), and hands `_play_session` a `find_next=queue.next_after` so autoplay/`n` walk **down the list (newest → oldest)** instead of the related-video sidebar; when the channel runs out the session ends with "채널 영상을 모두 들었습니다." `_Prefetch(url, played_ids, channel, session, find_next=None)` is the only seam: the default `find_next` is the old `fetch_next` sidebar lookup, and the stream pre-resolution (stage 2) applies to both modes unchanged. `ChannelQueue.ensure(n)` fetches pages lazily; `_run_channel` keeps one selector page ahead (`ensure(page*10+1)`) so `select_video`'s "다음 페이지 ▶" button appears, and a fetch failure marks the channel exhausted rather than raising. After a session ends, channel mode returns to the same list, not the search prompt
@@ -91,7 +91,9 @@ brew install mpv
 ## Data Flow
 
 ```
-search(query) -> [{"title", "channel", "url", "duration"}, ...]  # 30개 한번에
+search(query) -> [{"title", "channel", "url", "duration", "age": "5일 전"|None}, ...]  # 30개 한번에(innertube 2요청). age는 YouTube 표기 그대로
+# select_video/select_recent 항목은 questionary.Choice 하나에 '\n'으로 두 줄을 넣는다 (제목 / 흐린 메타). 항목 사이에는 빈 Separator 한 줄 (한 항목 = 3행, 10개면 30행).
+#   Choice.value는 예전 그대로 '제목 · 채널 [길이]' 한 줄이라 url 역참조와 테스트가 화면 형식에 묶이지 않는다
 select_video(videos, page, max_pages, message=...) -> url | NEXT_PAGE | PREV_PAGE | None
 select_recent(items) -> url | NEW_SEARCH | None
 
