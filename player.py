@@ -485,6 +485,8 @@ class PlayerSession:
             self._redraw(force=True)
         elif key == "t":
             self._request_comments()
+        elif key in ("(", ")"):
+            self._send("add", "volume", 10 if key == ")" else -10)
         else:
             self._send("keypress", key)
 

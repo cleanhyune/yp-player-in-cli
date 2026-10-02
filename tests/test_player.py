@@ -359,6 +359,16 @@ def test_other_keys_are_forwarded_to_mpv_as_keypress(session):
     assert ("keypress", "SPACE") in cmds and ("keypress", "RIGHT") in cmds and ("keypress", "9") in cmds
 
 
+def test_paren_keys_change_volume_by_ten(session):
+    session._client.events.put(_key("("))
+    session._client.events.put(_key(")"))
+    session._client.events.put(_end("eof"))
+    session.load(URL)
+    cmds = session._client.commands
+    assert ("add", "volume", -10) in cmds and ("add", "volume", 10) in cmds
+    assert ("keypress", "(") not in cmds and ("keypress", ")") not in cmds
+
+
 def test_g_key_opens_prompt_and_seeks_on_valid_timecode(session):
     for k in ("g", "0", "7", "1", "0", "ENTER"):
         session._client.events.put(_key(k))
